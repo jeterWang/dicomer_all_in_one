@@ -6,6 +6,7 @@ import numpy as np
 import pyvista as pv
 import vtk
 from .state import State
+import matplotlib.cm as cm
 
 class ImagePlotter:
     """图像可视化类"""
@@ -79,8 +80,6 @@ class ImagePlotter:
         self.points = points.copy()
         
         # 计算实际的位移向量（考虑空间变换）
-        # 1. 首先计算原始位移
-        original_displacement = displaced_points - points
         
         # 2. 将位移点云移动到正确位置
         self.displaced_points = displaced_points.copy()
@@ -207,18 +206,24 @@ class ImagePlotter:
         else:
             print(f"Invalid indices: {index} for image shape: {shape}")
         
-    def update_volume(self, full_update=False):
+    def update_volume(self, full_update=False, update_where='all'):
         """更新体积渲染和点云
         
         Args:
             full_update (bool): 是否进行完全更新
+            update_where (str): 指定更新区域 'all', 'week0', 'week4', 'points'
         """
         try:
-            if full_update:
-                self._needs_full_update = True
+            # if full_update:
+            #     self._needs_full_update = True
+            #     update_where = 'all'  # 强制完全更新
                 
-            if self._needs_full_update:
-                print("开始更新体积渲染...")
+            print(f"更新渲染区域: {update_where}")
+                
+            # 根据更新区域进行不同的更新操作
+            if update_where == 'all' or self._needs_full_update:
+                # 完整更新所有内容
+                print("完整更新所有内容...")
                 
                 # 移除现有的actors
                 if self.state.current_mapper_week0 is not None:
@@ -227,184 +232,57 @@ class ImagePlotter:
                     self.plotter.remove_actor(self.state.current_mapper_week4)
                 if self.state.current_points is not None:
                     self.plotter.remove_actor(self.state.current_points)
+                if self.state.current_displaced_points is not None:
+                    self.plotter.remove_actor(self.state.current_displaced_points)
                 if self.state.current_arrows is not None:
                     self.plotter.remove_actor(self.state.current_arrows)
-                    
-                # 提取Week 0图像的切片
-                print("正在提取Week 0图像切片...")
-                extracted_week0 = self.grid_week0.extract_subset([
-                    0, self.grid_week0.dimensions[0] - 1,
-                    0, self.grid_week0.dimensions[1] - 1,
-                    self.state.slice_min_week0, self.state.slice_max_week0
-                ])
                 
-                # 使用正确的映射范围
-                window_week0 = self.state.window_week0
-                level_week0 = self.state.level_week0
-                clim_week0 = [level_week0 - window_week0 / 2, level_week0 + window_week0 / 2]
+                # 更新Week 0体积
+                self._update_week0_volume()
                 
-                # 添加Week 0的切片
-                print("正在添加Week 0体积...")
-                mapper_week0 = self.plotter.add_volume(
-                    extracted_week0,
-                    cmap='gray',
-                    clim=clim_week0,
-                    opacity=self.state.opacity_week0,
-                    reset_camera=False
-                )
+                # 更新Week 4体积
+                self._update_week4_volume()
                 
-                self.state.current_mapper_week0 = mapper_week0
-                
-                # 提取Week 4图像的切片
-                print("正在提取Week 4图像切片...")
-                extracted_week4 = self.grid_week4.extract_subset([
-                    0, self.grid_week4.dimensions[0] - 1,
-                    0, self.grid_week4.dimensions[1] - 1,
-                    self.state.slice_min_week4, self.state.slice_max_week4
-                ])
-                
-                # 使用正确的映射范围
-                window_week4 = self.state.window_week4
-                level_week4 = self.state.level_week4
-                clim_week4 = [level_week4 - window_week4 / 2, level_week4 + window_week4 / 2]
-                
-                # 添加Week 4的切片
-                print("正在添加Week 4体积...")
-                mapper_week4 = self.plotter.add_volume(
-                    extracted_week4,
-                    cmap='gray',
-                    clim=clim_week4,
-                    opacity=self.state.opacity_week4,
-                    reset_camera=False
-                )
-                
-                self.state.current_mapper_week4 = mapper_week4
+                # 更新点云
+                self._update_points()
                 
                 # 更新切片范围缓存
                 self._last_slice_min_week0 = self.state.slice_min_week0
                 self._last_slice_max_week0 = self.state.slice_max_week0
                 self._last_slice_min_week4 = self.state.slice_min_week4
                 self._last_slice_max_week4 = self.state.slice_max_week4
-                
-            # 检查是否需要更新点云
-            needs_point_update = (
-                self._needs_full_update or
-                self._last_point_slice_min != self.state.point_slice_min or
-                self._last_point_slice_max != self.state.point_slice_max or
-                self.state.current_points is None
-            )
-            
-            if needs_point_update:
-                print("正在处理点云数据...")
-                # 移除现有的点云
-                if self.state.current_points is not None:
-                    self.plotter.remove_actor(self.state.current_points)
-                if self.state.current_arrows is not None:
-                    self.plotter.remove_actor(self.state.current_arrows)
-                
-                # 筛选z坐标在所选范围内的点
-                mask = np.logical_and(
-                    self.points[:, 2] >= self.origin_week0[2] + self.state.point_slice_min * self.spacing_week0[2],
-                    self.points[:, 2] <= self.origin_week0[2] + self.state.point_slice_max * self.spacing_week0[2]
-                )
-                
-                filtered_points = self.points[mask]
-                filtered_displaced_points = self.displaced_points[mask]
-                
-                if len(filtered_points) > 0:
-                    # 创建筛选后的点云对象
-                    filtered_point_cloud = pv.PolyData(filtered_points)
-                    
-                    # 添加点云
-                    point_actor = self.plotter.add_points(
-                        filtered_point_cloud,
-                        color='red',
-                        point_size=self.state.point_size,
-                        reset_camera=False
-                    )
-                    
-                    self.state.current_points = point_actor
-                    
-                    if self.state.show_arrows and len(filtered_points) > 0:
-                        # 创建箭头数据
-                        arrow_actors = []
-                        
-                        # 计算规范化系数 - 全局最大值的50%
-                        scale_factor = self.max_magnitude * 0.5
-                                        
-                        # 绘制部分箭头（太多会影响性能）
-                        step = max(1, len(filtered_points) // 100)  # 最多显示100个箭头
-                        print(f"正在创建箭头，总点数: {len(filtered_points)}，步长: {step}...")
-                        
-                        for i in range(0, len(filtered_points), step):
-                            start = filtered_points[i]
-                            end = filtered_displaced_points[i]
-                            direction = end - start
-                            
-                            # 计算箭头长度
-                            length = np.linalg.norm(direction)
-                            if length < 1e-6:  # 避免零长度箭头
-                                continue
-                                
-                            # 使用 pyvista 创建箭头
-                            direction_normalized = direction / length
-                            arrow = pv.Arrow(start, direction_normalized, scale=length/scale_factor)
-                                                
-                            # 添加到场景
-                            arrow_actor = self.plotter.add_mesh(
-                                arrow,
-                                color='yellow',
-                                reset_camera=False
-                            )
-                            arrow_actors.append(arrow_actor)
-                        
-                        # 存储所有箭头
-                        self.state.current_arrows = arrow_actors
-                
-                # 更新点云切片范围缓存
                 self._last_point_slice_min = self.state.point_slice_min
                 self._last_point_slice_max = self.state.point_slice_max
-            
+                
+            elif update_where == 'week0':
+                # 只更新Week 0体积
+                print("只更新Week 0体积...")
+                if self.state.current_mapper_week0 is not None:
+                    self.plotter.remove_actor(self.state.current_mapper_week0)
+                self._update_week0_volume()
+                
+            elif update_where == 'week4':
+                # 只更新Week 4体积
+                print("只更新Week 4体积...")
+                if self.state.current_mapper_week4 is not None:
+                    self.plotter.remove_actor(self.state.current_mapper_week4)
+                self._update_week4_volume()
+                
+            elif update_where == 'points':
+                # 只更新点云
+                print("只更新点云...")
+                if self.state.current_points is not None:
+                    self.plotter.remove_actor(self.state.current_points)
+                if self.state.current_displaced_points is not None:
+                    self.plotter.remove_actor(self.state.current_displaced_points)
+                if self.state.current_arrows is not None:
+                    self.plotter.remove_actor(self.state.current_arrows)
+                self._update_points()
+                
             # 强制刷新渲染
-            print("强制刷新渲染...")
-            
-            # 尝试所有可能的渲染更新方法，确保渲染能正确显示
+            print("渲染更新...")
             if hasattr(self.plotter, 'render'):
                 self.plotter.render()
-                
-            if hasattr(self.plotter, 'update'):
-                self.plotter.update()
-                
-            if hasattr(self.plotter, 'ren_win'):
-                self.plotter.ren_win.Render()
-                
-            # 如果是Qt集成环境，通知刷新
-            if hasattr(self.plotter, 'app') and hasattr(self.plotter.app, 'processEvents'):
-                self.plotter.app.processEvents()
-                
-            # 额外的渲染步骤，确保完全刷新
-            if hasattr(self.plotter, 'reset_camera_clipping_range'):
-                self.plotter.reset_camera_clipping_range()
-                
-            # 如果是full_update，尝试使用其他方法强制刷新
-            if full_update:
-                # 尝试不同的刷新方法
-                if hasattr(self.plotter, 'reset_camera'):
-                    self.plotter.reset_camera()
-                    
-                # 强制重新渲染
-                if hasattr(self.plotter, 'render'):
-                    self.plotter.render()
-                
-                # 尝试重置摄像机裁剪范围
-                if hasattr(self.plotter, 'reset_camera_clipping_range'):
-                    self.plotter.reset_camera_clipping_range()
-                    
-                # 另一种刷新方式
-                if hasattr(self.plotter, 'ren_win') and hasattr(self.plotter.ren_win, 'Render'):
-                    self.plotter.ren_win.Render()
-                
-            print("体积渲染更新完成。")
             
             # 重置更新标志
             self._needs_full_update = False
@@ -413,220 +291,215 @@ class ImagePlotter:
             import traceback
             print(f"更新体积时出错: {str(e)}")
             traceback.print_exc()
-
-    def setup_sliders(self):
-        """设置控制滑块"""
-        # 如果使用Qt控件，则跳过PyVista滑块设置
-        if self.use_qt_controls:
-            print("使用Qt控件，跳过PyVista滑块设置")
-            # 初始化体积渲染
-            self.update_volume()
-            return
             
-        # 确保plotter支持小部件
-        if not hasattr(self.plotter, 'add_slider_widget'):
-            print("警告: 当前plotter不支持滑块控件，跳过滑块设置")
-            return
-            
-        try:
-            print("开始设置滑块控件...")
-            
-            # Week 0图像的控制滑块 - 缩短标题并调整位置
-            self.plotter.add_slider_widget(
-                self._update_slice_min_week0,
-                [0, self.array_week0.shape[0] - 1],
-                value=self.state.slice_min_week0,
-                title='W0 Min',
-                pointa=(0.01, 0.99),
-                pointb=(0.24, 0.99),
-            )
-            
-            self.plotter.add_slider_widget(
-                self._update_slice_max_week0,
-                [0, self.array_week0.shape[0] - 1],
-                value=self.state.slice_max_week0,
-                title='W0 Max',
-                pointa=(0.26, 0.99),
-                pointb=(0.49, 0.99),
-            )
-            
-            self.plotter.add_slider_widget(
-                self._update_window_week0,
-                [100, 5000],
-                value=self.state.window_week0,
-                title='W0 Win',
-                pointa=(0.01, 0.96),
-                pointb=(0.24, 0.96),
-            )
-            
-            self.plotter.add_slider_widget(
-                self._update_level_week0,
-                [-1000, 3000],
-                value=self.state.level_week0,
-                title='W0 Lvl',
-                pointa=(0.26, 0.96),
-                pointb=(0.49, 0.96),
-            )
-            
-            self.plotter.add_slider_widget(
-                self._update_opacity_week0,
-                [0, 1],
-                value=self.state.opacity_week0,
-                title='W0 Op',
-                pointa=(0.01, 0.93),
-                pointb=(0.24, 0.93),
-            )
-            
-            # Week 4图像的控制滑块
-            self.plotter.add_slider_widget(
-                self._update_slice_min_week4,
-                [0, self.array_week4.shape[0] - 1],
-                value=self.state.slice_min_week4,
-                title='W4 Min',
-                pointa=(0.51, 0.99),
-                pointb=(0.74, 0.99),
-            )
-            
-            self.plotter.add_slider_widget(
-                self._update_slice_max_week4,
-                [0, self.array_week4.shape[0] - 1],
-                value=self.state.slice_max_week4,
-                title='W4 Max',
-                pointa=(0.76, 0.99),
-                pointb=(0.99, 0.99),
-            )
-            
-            self.plotter.add_slider_widget(
-                self._update_window_week4,
-                [100, 5000],
-                value=self.state.window_week4,
-                title='W4 Win',
-                pointa=(0.51, 0.96),
-                pointb=(0.74, 0.96),
-            )
-            
-            self.plotter.add_slider_widget(
-                self._update_level_week4,
-                [-1000, 3000],
-                value=self.state.level_week4,
-                title='W4 Lvl',
-                pointa=(0.76, 0.96),
-                pointb=(0.99, 0.96),
-            )
-            
-            self.plotter.add_slider_widget(
-                self._update_opacity_week4,
-                [0, 1],
-                value=self.state.opacity_week4,
-                title='W4 Op',
-                pointa=(0.51, 0.93),
-                pointb=(0.74, 0.93),
-            )
-            
-            # 点云控制滑块
-            self.plotter.add_slider_widget(
-                self._update_point_size,
-                [1, 20],
-                value=self.state.point_size,
-                title='Point Size',
-                pointa=(0.26, 0.93),
-                pointb=(0.49, 0.93),
-            )
-            
-            self.plotter.add_slider_widget(
-                self._update_point_slice_min,
-                [0, self.array_week0.shape[0] - 1],
-                value=self.state.point_slice_min,
-                title='Pt Min',
-                pointa=(0.01, 0.90),
-                pointb=(0.24, 0.90),
-            )
-            
-            self.plotter.add_slider_widget(
-                self._update_point_slice_max,
-                [0, self.array_week0.shape[0] - 1],
-                value=self.state.point_slice_max,
-                title='Pt Max',
-                pointa=(0.26, 0.90),
-                pointb=(0.49, 0.90),
-            )
-            
-            # 添加位移箭头开关
-            self.plotter.add_checkbox_button_widget(
-                self._toggle_arrows,
-                value=self.state.show_arrows,
-                position=(10, 10),
-                size=30,
-                color_on='green',
-                color_off='red',
-                background_color='gray'
-            )
-            
-            print("滑块控件设置完成")
-            
-        except Exception as e:
-            import traceback
-            print(f"设置滑块时出错: {str(e)}")
-            traceback.print_exc()
+    def _update_week0_volume(self):
+        """只更新Week 0体积渲染"""
+        # 提取Week 0图像的切片
+        extracted_week0 = self.grid_week0.extract_subset([
+            0, self.grid_week0.dimensions[0] - 1,
+            0, self.grid_week0.dimensions[1] - 1,
+            self.state.slice_min_week0, self.state.slice_max_week0
+        ])
         
-        # 初始化体积渲染
-        self.update_volume()
-    
+        # 使用正确的映射范围
+        window_week0 = self.state.window_week0
+        level_week0 = self.state.level_week0
+        clim_week0 = [level_week0 - window_week0 / 2, level_week0 + window_week0 / 2]
+        
+        # 添加Week 0的切片
+        mapper_week0 = self.plotter.add_volume(
+            extracted_week0,
+            cmap='gray',
+            clim=clim_week0,
+            opacity=self.state.opacity_week0,
+            reset_camera=False
+        )
+        
+        self.state.current_mapper_week0 = mapper_week0
+        
+    def _update_week4_volume(self):
+        """只更新Week 4体积渲染"""
+        # 提取Week 4图像的切片
+        extracted_week4 = self.grid_week4.extract_subset([
+            0, self.grid_week4.dimensions[0] - 1,
+            0, self.grid_week4.dimensions[1] - 1,
+            self.state.slice_min_week4, self.state.slice_max_week4
+        ])
+        
+        # 使用正确的映射范围
+        window_week4 = self.state.window_week4
+        level_week4 = self.state.level_week4
+        clim_week4 = [level_week4 - window_week4 / 2, level_week4 + window_week4 / 2]
+        
+        # 添加Week 4的切片
+        mapper_week4 = self.plotter.add_volume(
+            extracted_week4,
+            cmap='gray',
+            clim=clim_week4,
+            opacity=self.state.opacity_week4,
+            reset_camera=False
+        )
+        
+        self.state.current_mapper_week4 = mapper_week4
+            
+    def _update_points(self):
+        """只更新点云渲染"""
+        # 同时考虑原始点云和位移点云的Z坐标
+        min_z = self.origin_week0[2] + self.state.point_slice_min * self.spacing_week0[2]
+        max_z = self.origin_week0[2] + self.state.point_slice_max * self.spacing_week0[2]
+        
+        # 创建分开的掩码，以便单独筛选两种点云
+        orig_mask = np.logical_and(
+            self.points[:, 2] >= min_z,
+            self.points[:, 2] <= max_z
+        )
+        
+        disp_mask = np.logical_and(
+            self.displaced_points[:, 2] >= min_z,
+            self.displaced_points[:, 2] <= max_z
+        )
+        
+        # 合并掩码 - 保留任一点云在范围内的点
+        combined_mask = np.logical_or(orig_mask, disp_mask)
+        
+        # 应用合并的掩码
+        filtered_points = self.points[combined_mask]
+        filtered_displaced_points = self.displaced_points[combined_mask]
+        
+        if len(filtered_points) > 0:
+            # 创建筛选后的点云对象
+            filtered_point_cloud = pv.PolyData(filtered_points)
+            filtered_displaced_point_cloud = pv.PolyData(filtered_displaced_points)
+            
+            # 创建颜色映射
+            n_points = len(filtered_point_cloud.points)
+            colormap = cm.rainbow(np.linspace(0, 1, n_points))
+            
+            # 为点云设置颜色数据
+            colors = np.zeros((n_points, 3))
+            for i in range(n_points):
+                colors[i] = colormap[i, :3]  # 取RGB部分，忽略Alpha通道
+            
+            # 将颜色数据添加到点云
+            filtered_point_cloud.point_data["colors"] = colors
+            filtered_displaced_point_cloud.point_data["colors"] = colors  # 位移点使用相同颜色映射
+            
+            # 添加原始点云 - 使用自定义颜色映射
+            point_actor = self.plotter.add_points(
+                filtered_point_cloud,
+                scalars="colors",
+                rgb=True,
+                point_size=self.state.point_size,
+                reset_camera=False
+            )
+
+            # 添加位移点云 - 使用相同的颜色映射
+            displaced_point_actor = self.plotter.add_points(
+                filtered_displaced_point_cloud,
+                scalars="colors",
+                rgb=True,
+                point_size=self.state.point_size,
+                reset_camera=False
+            )
+            
+            # 将两个点云actor都保存到状态中
+            self.state.current_points = point_actor
+            self.state.current_displaced_points = displaced_point_actor
+            
+            if self.state.show_arrows and len(filtered_points) > 0:
+                # 创建箭头数据
+                arrow_actors = []
+                
+                # 计算规范化系数 - 全局最大值的50%
+                scale_factor = self.max_magnitude * 0.5
+                                
+                # 绘制部分箭头（太多会影响性能）
+                step = max(1, len(filtered_points) // 100)  # 最多显示100个箭头
+                
+                for i in range(0, len(filtered_points), step):
+                    start = filtered_points[i]
+                    end = filtered_displaced_points[i]
+                    direction = end - start
+                    
+                    # 计算箭头长度
+                    length = np.linalg.norm(direction)
+                    if length < 1e-6:  # 避免零长度箭头
+                        continue
+                        
+                    # 使用 pyvista 创建箭头
+                    direction_normalized = direction / length
+                    arrow = pv.Arrow(start, direction_normalized, scale=length/scale_factor)
+                                        
+                    # 添加到场景
+                    arrow_actor = self.plotter.add_mesh(
+                        arrow,
+                        color='yellow',
+                        reset_camera=False
+                    )
+                    arrow_actors.append(arrow_actor)
+                
+                # 存储所有箭头
+                self.state.current_arrows = arrow_actors
+                
+        # 更新点云切片范围缓存
+        self._last_point_slice_min = self.state.point_slice_min
+        self._last_point_slice_max = self.state.point_slice_max
+        
     def _update_slice_min_week0(self, value):
         self.state.slice_min_week0 = int(value)
-        self.update_volume()
+        self.update_volume(update_where='week0')
         
     def _update_slice_max_week0(self, value):
         self.state.slice_max_week0 = int(value)
-        self.update_volume()
+        self.update_volume(update_where='week0')
         
     def _update_window_week0(self, value):
         self.state.window_week0 = value
-        self.update_volume()
+        self.update_volume(update_where='week0')
         
     def _update_level_week0(self, value):
         self.state.level_week0 = value
-        self.update_volume()
+        self.update_volume(update_where='week0')
         
     def _update_opacity_week0(self, value):
         self.state.opacity_week0 = value
-        self.update_volume()
+        self.update_volume(update_where='week0')
         
     def _update_slice_min_week4(self, value):
         self.state.slice_min_week4 = int(value)
-        self.update_volume()
+        self.update_volume(update_where='week4')
         
     def _update_slice_max_week4(self, value):
         self.state.slice_max_week4 = int(value)
-        self.update_volume()
+        self.update_volume(update_where='week4')
         
     def _update_window_week4(self, value):
         self.state.window_week4 = value
-        self.update_volume()
+        self.update_volume(update_where='week4')
         
     def _update_level_week4(self, value):
         self.state.level_week4 = value
-        self.update_volume()
+        self.update_volume(update_where='week4')
         
     def _update_opacity_week4(self, value):
         self.state.opacity_week4 = value
-        self.update_volume()
+        self.update_volume(update_where='week4')
         
     def _update_point_size(self, value):
         self.state.point_size = value
-        self.update_volume()
+        self.update_volume(update_where='points')
         
     def _update_point_slice_min(self, value):
         self.state.point_slice_min = int(value)
-        self.update_volume()
+        self.update_volume(update_where='points')
         
     def _update_point_slice_max(self, value):
         self.state.point_slice_max = int(value)
-        self.update_volume()
+        self.update_volume(update_where='points')
         
     def _toggle_arrows(self, state):
         self.state.show_arrows = state
-        self.update_volume()
+        self.update_volume(update_where='points')
         
     def show(self):
         """显示可视化结果"""

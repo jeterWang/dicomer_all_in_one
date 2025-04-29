@@ -21,6 +21,7 @@ class DVFViewer(QWidget):
         
         # 渲染标志，不再需要定时器
         self.needs_update = False  # 标记是否需要更新
+        self.current_update_area = 'all'  # 跟踪当前操作的区域
         
         self.init_ui()
         
@@ -414,32 +415,36 @@ class DVFViewer(QWidget):
         if self.plotter:
             self.plotter.state.slice_min_week0 = lower
             self.plotter.state.slice_max_week0 = upper
-            # 只标记需要更新，不立即渲染
+            # 标记需要更新区域
             self.needs_update = True
+            self.current_update_area = 'week0'
             
     @pyqtSlot(int)
     def on_w0_window_changed(self, value):
         self.w0_window_value.setValue(value)
         if self.plotter:
             self.plotter.state.window_week0 = value
-            # 只标记需要更新，不立即渲染
+            # 标记需要更新区域
             self.needs_update = True
+            self.current_update_area = 'week0'
             
     @pyqtSlot(int)
     def on_w0_level_changed(self, value):
         self.w0_level_value.setValue(value)
         if self.plotter:
             self.plotter.state.level_week0 = value
-            # 只标记需要更新，不立即渲染
+            # 标记需要更新区域
             self.needs_update = True
+            self.current_update_area = 'week0'
             
     @pyqtSlot(int)
     def on_w0_opacity_changed(self, value):
         self.w0_opacity_value.setValue(value)
         if self.plotter:
             self.plotter.state.opacity_week0 = value / 100.0  # 转换为0-1
-            # 只标记需要更新，不立即渲染
+            # 标记需要更新区域
             self.needs_update = True
+            self.current_update_area = 'week0'
     
     # Week 4 控制槽
     @pyqtSlot(int, int)
@@ -447,32 +452,36 @@ class DVFViewer(QWidget):
         if self.plotter:
             self.plotter.state.slice_min_week4 = lower
             self.plotter.state.slice_max_week4 = upper
-            # 只标记需要更新，不立即渲染
+            # 标记需要更新区域
             self.needs_update = True
+            self.current_update_area = 'week4'
             
     @pyqtSlot(int)
     def on_w4_window_changed(self, value):
         self.w4_window_value.setValue(value)
         if self.plotter:
             self.plotter.state.window_week4 = value
-            # 只标记需要更新，不立即渲染
+            # 标记需要更新区域
             self.needs_update = True
+            self.current_update_area = 'week4'
             
     @pyqtSlot(int)
     def on_w4_level_changed(self, value):
         self.w4_level_value.setValue(value)
         if self.plotter:
             self.plotter.state.level_week4 = value
-            # 只标记需要更新，不立即渲染
+            # 标记需要更新区域
             self.needs_update = True
+            self.current_update_area = 'week4'
             
     @pyqtSlot(int)
     def on_w4_opacity_changed(self, value):
         self.w4_opacity_value.setValue(value)
         if self.plotter:
             self.plotter.state.opacity_week4 = value / 100.0  # 转换为0-1
-            # 只标记需要更新，不立即渲染
+            # 标记需要更新区域
             self.needs_update = True
+            self.current_update_area = 'week4'
     
     # 点云控制槽
     @pyqtSlot(int)
@@ -480,24 +489,26 @@ class DVFViewer(QWidget):
         self.point_size_value.setValue(value)
         if self.plotter:
             self.plotter.state.point_size = value
-            # 只标记需要更新，不立即渲染
+            # 标记需要更新区域
             self.needs_update = True
+            self.current_update_area = 'points'
             
     @pyqtSlot(int, int)
     def on_point_slice_range_changed(self, lower, upper):
         if self.plotter:
             self.plotter.state.point_slice_min = lower
             self.plotter.state.point_slice_max = upper
-            # 只标记需要更新，不立即渲染
+            # 标记需要更新区域
             self.needs_update = True
+            self.current_update_area = 'points'
             
     @pyqtSlot(int)
     def on_show_arrows_changed(self, state):
         if self.plotter:
             self.plotter.state.show_arrows = state == Qt.Checked
-            # 立即执行完整渲染（复选框操作不频繁）
+            # 立即执行渲染（复选框操作不频繁）
             print("显示箭头状态改变，执行渲染...")
-            self.plotter.update_volume(full_update=True)
+            self.plotter.update_volume(update_where='points')
             
     def select_data(self):
         """选择数据目录"""
@@ -589,7 +600,7 @@ class DVFViewer(QWidget):
     def on_slider_released(self):
         """当滑块释放时立即执行渲染"""
         if self.plotter and self.needs_update:
-            # 执行完整渲染
-            self.plotter.update_volume(full_update=True)
-            self.needs_update = False
-            print("滑块释放，执行渲染...") 
+            # 根据当前操作的区域执行对应的渲染
+            print(f"滑块释放，执行渲染区域: {self.current_update_area}...")
+            self.plotter.update_volume(update_where=self.current_update_area)
+            self.needs_update = False 

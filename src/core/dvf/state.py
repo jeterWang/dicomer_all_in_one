@@ -38,4 +38,5 @@ class State:
         self.current_mapper_week0 = None
         self.current_mapper_week4 = None
         self.current_points = None
+        self.current_displaced_points = None
         self.current_arrows = None 
