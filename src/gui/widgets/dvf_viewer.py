@@ -3,10 +3,11 @@
 
 import os
 import sys
+import logging
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                            QLabel, QFileDialog, QGroupBox, QFormLayout,
                            QMessageBox, QFrame, QSplitter, QSlider, QCheckBox,
-                           QGridLayout, QSpinBox, QSizePolicy)
+                           QGridLayout, QSpinBox, QSizePolicy, QLineEdit, QComboBox)
 from PyQt5.QtCore import Qt, pyqtSlot, QTimer
 from PyQt5.QtGui import QColor
 
@@ -15,6 +16,9 @@ from src.core.dvf import read_ct_series, read_point_cloud, read_displacement_fie
 from src.gui.widgets.vtk_widget import VTKWidget
 from src.gui.widgets.range_slider import RangeSlider
 
+# 获取 logger 实例
+logger = logging.getLogger(__name__)
+
 class DVFViewer(QWidget):
     def __init__(self):
         super().__init__()
@@ -22,6 +26,13 @@ class DVFViewer(QWidget):
         # 渲染标志，不再需要定时器
         self.needs_update = False  # 标记是否需要更新
         self.current_update_area = 'all'  # 跟踪当前操作的区域
+        
+        # 初始化数据路径和状态
+        self.base_patient_dir = None # <-- 添加 base_patient_dir 初始化
+        self.ct_directory_week0 = None
+        self.ct_directory_week4 = None
+        self.point_cloud_path = None
+        self.displacement_path = None
         
         self.init_ui()
         
@@ -44,22 +55,23 @@ class DVFViewer(QWidget):
         left_layout.setSpacing(15)  # 增加控件间距
         
         # 创建控制面板
-        control_panel = QGroupBox("DVF 控制面板")
+        control_group = QGroupBox("DVF 控制面板")
         control_layout = QFormLayout()
         control_layout.setSpacing(10)  # 增加表单元素间距
-        control_panel.setLayout(control_layout)
+        control_group.setLayout(control_layout)
         
-        # 添加患者ID输入
-        self.patient_id_label = QLabel("患者ID:")
-        self.patient_id_input = QLabel("未选择")
-        control_layout.addRow(self.patient_id_label, self.patient_id_input)
+        # 患者 ID (通常是文件夹名)
+        self.patient_id_input = QLineEdit()
+        self.patient_id_input.setReadOnly(True)
+        control_layout.addRow("患者ID:", self.patient_id_input)
+
+        # 实例 ID (改为下拉选择)
+        self.instance_combo = QComboBox()
+        self.instance_combo.setEnabled(False) # 初始禁用
+        self.instance_combo.currentIndexChanged.connect(self._on_instance_selected)
+        control_layout.addRow("实例ID:", self.instance_combo)
         
-        # 添加实例ID输入
-        self.instance_id_label = QLabel("实例ID:")
-        self.instance_id_input = QLabel("未选择")
-        control_layout.addRow(self.instance_id_label, self.instance_id_input)
-        
-        # 添加选择数据按钮
+        # 选择数据按钮
         self.select_data_btn = QPushButton("选择数据")
         self.select_data_btn.setMinimumHeight(30)  # 增加按钮高度
         self.select_data_btn.clicked.connect(self.select_data)
@@ -82,7 +94,7 @@ class DVFViewer(QWidget):
         line.setFrameShadow(QFrame.Sunken)
         
         # 将控制面板添加到左侧布局
-        left_layout.addWidget(control_panel)
+        left_layout.addWidget(control_group)
         left_layout.addWidget(line)
         
         # 添加一个消息区域
@@ -307,12 +319,6 @@ class DVFViewer(QWidget):
         splitter.setStretchFactor(0, 0)  # 左侧面板不伸缩
         splitter.setStretchFactor(1, 1)  # 右侧面板可伸缩
         
-        # 初始化数据路径
-        self.ct_directory_week0 = None
-        self.ct_directory_week4 = None
-        self.point_cloud_path = None
-        self.displacement_path = None
-        
         # 初始化图像绘制器
         self.plotter = None
         
@@ -514,10 +520,16 @@ class DVFViewer(QWidget):
         """选择数据目录"""
         try:
             # 选择患者数据目录
-            patient_dir = QFileDialog.getExistingDirectory(self, "选择患者数据目录", "data")
+            # 使用 self.base_patient_dir 作为起始目录（如果已选择过）
+            start_dir = self.base_patient_dir if self.base_patient_dir else "data"
+            patient_dir = QFileDialog.getExistingDirectory(self, "选择患者数据目录", start_dir)
             if not patient_dir:
                 return
                 
+            # ===> 存储基础患者目录 <===
+            self.base_patient_dir = patient_dir
+            # ==========================
+            
             # 获取患者ID（目录名）
             patient_id = os.path.basename(patient_dir)
             self.patient_id_input.setText(patient_id)
@@ -528,71 +540,157 @@ class DVFViewer(QWidget):
             
             # 检查目录是否存在
             if not os.path.exists(images_dir):
-                QMessageBox.warning(self, "警告", "未找到images目录！")
+                QMessageBox.warning(self, "警告", f"未找到 images 目录: {images_dir}")
                 return
                 
             if not os.path.exists(instances_dir):
-                QMessageBox.warning(self, "警告", "未找到instances目录！")
+                QMessageBox.warning(self, "警告", f"未找到 instances 目录: {instances_dir}")
                 return
                 
-            # 查找week0和week4目录
+            # --- 修改：查找并填充实例 ID 下拉菜单 ---
+            self.instance_combo.clear()
+            self.instance_combo.setEnabled(False) # 先禁用
+            self.show_dvf_btn.setEnabled(False) # 选择新病人时先禁用显示按钮
+            self.clear_paths_and_status()
+
+            try:
+                instance_dirs = sorted([d for d in os.listdir(instances_dir) 
+                                    if os.path.isdir(os.path.join(instances_dir, d))])
+            except OSError as e:
+                QMessageBox.critical(self, "错误", f"无法读取 instances 目录内容: {e}")
+                return
+
+            if not instance_dirs:
+                QMessageBox.warning(self, "警告", "在 instances 目录下未找到任何实例子目录！")
+                # 清空可能残留的实例 ID 显示
+                # self.instance_id_input.clear() # 如果还保留这个输入框的话
+                return
+            
+            # 填充下拉菜单
+            self.instance_combo.addItems(instance_dirs)
+            self.instance_combo.setEnabled(True)
+            
+            # ===> 显式触发第一个实例的处理 <===
+            if instance_dirs: # 确保列表不为空
+                 # 手动调用以加载第一个实例的信息
+                 # 设置当前索引也会触发信号，但有时显式调用更清晰
+                 self.instance_combo.setCurrentIndex(0) 
+                 # self._on_instance_selected() # 或者直接调用，但设置索引通常更好
+            # =============================
+
+            # 查找week0和week4目录 (这部分可能与 DVF 显示直接相关，检查是否需要)
+            # !!! 注意：这部分查找 CT 目录的代码也应该在 select_data 中执行 !!!
+            # !!! 因为 CT 目录通常是所有实例共享的，而不是每个实例独有的 !!!
+            images_dir = os.path.join(self.base_patient_dir, "images") # 使用 self.base_patient_dir
             ct_week0_dir = os.path.join(images_dir, "week0_CT")
             ct_week4_dir = os.path.join(images_dir, "week4_CT")
-            
-            if not os.path.exists(ct_week0_dir):
-                QMessageBox.warning(self, "警告", "未找到week0_CT目录！")
-                return
-                
-            if not os.path.exists(ct_week4_dir):
-                QMessageBox.warning(self, "警告", "未找到week4_CT目录！")
-                return
-                
-            # 获取实例目录（第一个实例）
-            instance_dirs = [d for d in os.listdir(instances_dir) 
-                           if os.path.isdir(os.path.join(instances_dir, d))]
-            if not instance_dirs:
-                QMessageBox.warning(self, "警告", "未找到实例目录！")
-                return
-                
-            instance_id = instance_dirs[0]
-            self.instance_id_input.setText(instance_id)
-            
-            # 构建点云和位移路径
-            instance_dir = os.path.join(instances_dir, instance_id)
-            voxel_disp_dir = os.path.join(instance_dir, "voxel_disp")
-            
-            point_cloud_path = os.path.join(instance_dir, "voxel_coord.csv")
-            displacement_path = os.path.join(voxel_disp_dir, "week0_CT_week4_CT_voxel_disp.csv")
-            
-            if not os.path.exists(point_cloud_path):
-                QMessageBox.warning(self, "警告", f"未找到点云文件: {point_cloud_path}")
-                return
-                
-            if not os.path.exists(displacement_path):
-                QMessageBox.warning(self, "警告", f"未找到位移文件: {displacement_path}")
-                return
-                
-            # 保存路径
-            self.ct_directory_week0 = ct_week0_dir
-            self.ct_directory_week4 = ct_week4_dir
-            self.point_cloud_path = point_cloud_path
-            self.displacement_path = displacement_path
-            
-            # 更新状态
-            self.status_label.setText("数据已加载")
-            self.message_label.setText(f"数据已加载:\n"
-                                     f"患者ID: {patient_id}\n"
-                                     f"实例ID: {instance_id}\n"
-                                     f"Week 0 CT: {ct_week0_dir}\n"
-                                     f"Week 4 CT: {ct_week4_dir}")
-            
-            # 启用显示按钮
-            self.show_dvf_btn.setEnabled(True)
-            
+
+            ct0_exists = os.path.exists(ct_week0_dir)
+            ct4_exists = os.path.exists(ct_week4_dir)
+
+            if not ct0_exists:
+                logger.warning(f"未找到 Week 0 CT 目录: {ct_week0_dir}")
+                # QMessageBox.warning(self, "警告", f"未找到 Week 0 CT 目录: {ct_week0_dir}")
+                self.ct_directory_week0 = None
+            else:
+                 self.ct_directory_week0 = ct_week0_dir
+                 logger.info(f"找到 Week 0 CT 目录: {ct_week0_dir}")
+
+            if not ct4_exists:
+                logger.warning(f"未找到 Week 4 CT 目录: {ct_week4_dir}")
+                # QMessageBox.warning(self, "警告", f"未找到 Week 4 CT 目录: {ct_week4_dir}")
+                self.ct_directory_week4 = None
+            else:
+                self.ct_directory_week4 = ct_week4_dir
+                logger.info(f"找到 Week 4 CT 目录: {ct_week4_dir}")
+
+            # 更新一次状态，因为 CT 路径已确定（或未找到）
+            # 但实例数据状态需等待 _on_instance_selected 完成
+            # 可以在 _on_instance_selected 内部更新完整消息
+
         except Exception as e:
             QMessageBox.critical(self, "错误", f"选择数据时出错: {str(e)}")
             self.status_label.setText("出错")
             
+    def _on_instance_selected(self):
+        """当用户在下拉列表中选择一个实例时调用"""
+        if not self.instance_combo.isEnabled() or self.instance_combo.count() == 0:
+             # 如果下拉菜单未启用或为空，则不执行任何操作
+             self.clear_paths_and_status()
+             self.show_dvf_btn.setEnabled(False)
+             return
+
+        instance_id = self.instance_combo.currentText()
+        # self.instance_id_input.setText(instance_id) # 如果保留了只读输入框
+        logger.info(f"用户选择了实例 ID: {instance_id}")
+
+        # 重新构建和检查路径
+        if not self.base_patient_dir: # 确保 base_patient_dir 已设置
+            logger.error("_on_instance_selected 被调用但 base_patient_dir 未设置")
+            return
+
+        instances_dir = os.path.join(self.base_patient_dir, "instances")
+        instance_dir = os.path.join(instances_dir, instance_id)
+        voxel_disp_dir = os.path.join(instance_dir, "voxel_disp")
+            
+        point_cloud_path = os.path.join(instance_dir, "voxel_coord.csv")
+        displacement_path = os.path.join(voxel_disp_dir, "week0_CT_week4_CT_voxel_disp.csv")
+            
+        # 检查所需文件是否存在
+        point_cloud_exists = os.path.exists(point_cloud_path)
+        displacement_exists = os.path.exists(displacement_path)
+
+        if not point_cloud_exists:
+            msg = f"未找到点云文件: {point_cloud_path}"
+            logger.warning(msg)
+            # QMessageBox.warning(self, "警告", msg) # 频繁切换时不宜弹窗
+            self.message_label.setText(msg)
+            self.status_label.setText("文件缺失")
+            self.show_dvf_btn.setEnabled(False)
+            # 清理路径变量
+            self.point_cloud_path = None
+            self.displacement_path = None
+            return
+                
+        if not displacement_exists:
+            msg = f"未找到位移文件: {displacement_path}"
+            logger.warning(msg)
+            # QMessageBox.warning(self, "警告", msg)
+            self.message_label.setText(msg)
+            self.status_label.setText("文件缺失")
+            self.show_dvf_btn.setEnabled(False)
+            # 清理路径变量
+            self.point_cloud_path = None
+            self.displacement_path = None
+            return
+                
+        # 文件都存在，保存路径并更新状态
+        self.point_cloud_path = point_cloud_path
+        self.displacement_path = displacement_path
+        logger.info(f"已为实例 {instance_id} 设置路径: PC={point_cloud_path}, Disp={displacement_path}")
+            
+        # 更新状态 (保持 CT 路径的显示，如果之前加载了的话)
+        ct0_info = f"Week 0 CT: {self.ct_directory_week0}" if self.ct_directory_week0 else "Week 0 CT: 未加载"
+        ct4_info = f"Week 4 CT: {self.ct_directory_week4}" if self.ct_directory_week4 else "Week 4 CT: 未加载"
+        self.status_label.setText("实例数据已准备")
+        self.message_label.setText(f"当前实例: {instance_id}\n" 
+                                     f"点云: ...{os.path.basename(point_cloud_path)}\n" 
+                                     f"位移: ...{os.path.basename(displacement_path)}\n"
+                                     f"{ct0_info}\n"
+                                     f"{ct4_info}")
+            
+        # 启用显示按钮 (仅当 CT 路径也准备好时才真正可显示，这里先假设可以)
+        # 实际的启用逻辑可能需要结合 CT 加载状态
+        self.show_dvf_btn.setEnabled(True)
+
+    def clear_paths_and_status(self):
+        """清空路径和状态信息"""
+        self.point_cloud_path = None
+        self.displacement_path = None
+        # 保留 CT 路径 self.ct_directory_week0/4
+        self.status_label.setText("待加载")
+        self.message_label.setText("请选择数据...")
+
     def adjustSize(self):
         # 实现调整大小的逻辑
         pass 

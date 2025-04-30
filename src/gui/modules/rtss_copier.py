@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import sys # 需要导入 sys 才能在 select_folder 中使用
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QFileDialog, QTextEdit, QMessageBox, QApplication)
+from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QFileDialog, QTextEdit, QMessageBox, QApplication, QGroupBox, QFormLayout, QDoubleSpinBox, QLabel, QHBoxLayout)
 from PyQt5.QtCore import Qt
 # 导入 pydicom 和自定义的 dicom 工具
 import pydicom
@@ -10,7 +10,10 @@ from src.core.dicom_utils import read_dicom_file
 from typing import Optional, Dict
 from collections import Counter
 # 导入 RTSS 复制功能
-from src.core.rtstruct_utils import copy_rtss_between_series
+from src.core.rtstruct_utils import copy_rtss_between_series, copy_rtss_with_transform
+# 导入 SimpleITK 用于创建变换
+import SimpleITK as sitk
+import math # 用于角度弧度转换
 
 # --- 实现 RTSS 扫描函数 ---
 # MAX_RTSS_FILE_SIZE_BYTES = 1 * 1024 * 1024 # 不再使用固定阈值
@@ -139,6 +142,8 @@ class RTSSCopier(QWidget):
         self.base_folder = None
         self.scan_results = None
         self.default_dir = self.calculate_default_dir()
+        # 初始化变换输入框字典，方便访问
+        self.transform_inputs = {}
         self.init_ui()
 
     def calculate_default_dir(self):
@@ -171,19 +176,66 @@ class RTSSCopier(QWidget):
         self.result_display.setPlaceholderText("扫描结果将显示在此处...")
         layout.addWidget(self.result_display)
 
-        # --- 复制按钮 ---
-        # Week 0 Button
-        self.copy_button_w0 = QPushButton("复制 Week0 PT->CT RTSS")
+        # 3. PT -> CT 复制按钮组
+        pt_ct_group = QGroupBox("PT -> CT 复制")
+        pt_ct_layout = QHBoxLayout()
+        pt_ct_group.setLayout(pt_ct_layout)
+
+        self.copy_button_w0 = QPushButton("复制 W0 PT->CT")
         self.copy_button_w0.clicked.connect(self.copy_week0_pt_to_ct)
-        self.copy_button_w0.setEnabled(False) # 初始禁用
-        layout.addWidget(self.copy_button_w0)
+        self.copy_button_w0.setEnabled(False)
+        pt_ct_layout.addWidget(self.copy_button_w0)
 
-        # Week 4 Button
-        self.copy_button_w4 = QPushButton("复制 Week4 PT->CT RTSS")
+        self.copy_button_w4 = QPushButton("复制 W4 PT->CT")
         self.copy_button_w4.clicked.connect(self.copy_week4_pt_to_ct)
-        self.copy_button_w4.setEnabled(False) # 初始禁用
-        layout.addWidget(self.copy_button_w4)
+        self.copy_button_w4.setEnabled(False)
+        pt_ct_layout.addWidget(self.copy_button_w4)
+        layout.addWidget(pt_ct_group)
 
+        # 4. W0 PT -> W4 PT (带变换) 复制组
+        w0w4_tx_group = QGroupBox("Week0 PT -> Week4 PT (带变换)")
+        w0w4_tx_layout = QFormLayout()
+        w0w4_tx_group.setLayout(w0w4_tx_layout)
+
+        # --- 变换参数输入 ---
+        # 旋转中心 (Cx, Cy, Cz)
+        center_layout = QHBoxLayout()
+        self.transform_inputs['Cx'] = QDoubleSpinBox(); self.transform_inputs['Cx'].setRange(-10000, 10000); self.transform_inputs['Cx'].setDecimals(3)
+        self.transform_inputs['Cy'] = QDoubleSpinBox(); self.transform_inputs['Cy'].setRange(-10000, 10000); self.transform_inputs['Cy'].setDecimals(3)
+        self.transform_inputs['Cz'] = QDoubleSpinBox(); self.transform_inputs['Cz'].setRange(-10000, 10000); self.transform_inputs['Cz'].setDecimals(3)
+        center_layout.addWidget(QLabel("Cx:")); center_layout.addWidget(self.transform_inputs['Cx'])
+        center_layout.addWidget(QLabel(" Cy:")); center_layout.addWidget(self.transform_inputs['Cy'])
+        center_layout.addWidget(QLabel(" Cz:")); center_layout.addWidget(self.transform_inputs['Cz'])
+        w0w4_tx_layout.addRow("旋转中心:", center_layout)
+
+        # 旋转角度 (Rx, Ry, Rz) - 单位：度
+        rotation_layout = QHBoxLayout()
+        self.transform_inputs['Rx'] = QDoubleSpinBox(); self.transform_inputs['Rx'].setRange(-360, 360); self.transform_inputs['Rx'].setDecimals(3)
+        self.transform_inputs['Ry'] = QDoubleSpinBox(); self.transform_inputs['Ry'].setRange(-360, 360); self.transform_inputs['Ry'].setDecimals(3)
+        self.transform_inputs['Rz'] = QDoubleSpinBox(); self.transform_inputs['Rz'].setRange(-360, 360); self.transform_inputs['Rz'].setDecimals(3)
+        rotation_layout.addWidget(QLabel("Rx (°):")); rotation_layout.addWidget(self.transform_inputs['Rx'])
+        rotation_layout.addWidget(QLabel(" Ry (°):")); rotation_layout.addWidget(self.transform_inputs['Ry'])
+        rotation_layout.addWidget(QLabel(" Rz (°):")); rotation_layout.addWidget(self.transform_inputs['Rz'])
+        w0w4_tx_layout.addRow("旋转角度:", rotation_layout)
+
+        # 平移向量 (Tx, Ty, Tz)
+        translation_layout = QHBoxLayout()
+        self.transform_inputs['Tx'] = QDoubleSpinBox(); self.transform_inputs['Tx'].setRange(-10000, 10000); self.transform_inputs['Tx'].setDecimals(3)
+        self.transform_inputs['Ty'] = QDoubleSpinBox(); self.transform_inputs['Ty'].setRange(-10000, 10000); self.transform_inputs['Ty'].setDecimals(3)
+        self.transform_inputs['Tz'] = QDoubleSpinBox(); self.transform_inputs['Tz'].setRange(-10000, 10000); self.transform_inputs['Tz'].setDecimals(3)
+        translation_layout.addWidget(QLabel("Tx:")); translation_layout.addWidget(self.transform_inputs['Tx'])
+        translation_layout.addWidget(QLabel(" Ty:")); translation_layout.addWidget(self.transform_inputs['Ty'])
+        translation_layout.addWidget(QLabel(" Tz:")); translation_layout.addWidget(self.transform_inputs['Tz'])
+        w0w4_tx_layout.addRow("平移向量:", translation_layout)
+
+        # 执行按钮
+        self.copy_button_w0w4_tx = QPushButton("执行 W0 PT -> W4 PT (带变换) 复制")
+        self.copy_button_w0w4_tx.clicked.connect(self.copy_w0pt_to_w4pt_with_transform)
+        self.copy_button_w0w4_tx.setEnabled(False) # 初始禁用
+        w0w4_tx_layout.addRow(self.copy_button_w0w4_tx)
+
+        layout.addWidget(w0w4_tx_group)
+        layout.addStretch(1) # 添加弹性空间到底部
         self.setLayout(layout)
 
     def select_folder(self):
@@ -241,28 +293,36 @@ class RTSSCopier(QWidget):
                  self.copy_button_w4.setEnabled(False)
 
     def update_copy_buttons_state(self):
-        """根据扫描结果更新两个复制按钮的启用状态"""
-        w0_enabled = False
-        w4_enabled = False
+        """根据扫描结果更新所有复制按钮的启用状态"""
+        w0_pt_ct_enabled = False
+        w4_pt_ct_enabled = False
+        w0pt_w4pt_tx_enabled = False # 新按钮的状态
 
         if self.scan_results and self.base_folder:
-            # Check Week 0
-            if self.scan_results.get('week0') and self.scan_results['week0'].get('PT_RTSS'):
-                ct0_dir = os.path.join(self.base_folder, 'week0_CT')
-                pt0_dir = os.path.join(self.base_folder, 'week0_PT')
-                if os.path.isdir(ct0_dir) and os.path.isdir(pt0_dir):
-                    w0_enabled = True
+            week0 = self.scan_results.get('week0')
+            week4 = self.scan_results.get('week4')
+            w0_pt_dir = os.path.join(self.base_folder, 'week0_PT')
+            w0_ct_dir = os.path.join(self.base_folder, 'week0_CT')
+            w4_pt_dir = os.path.join(self.base_folder, 'week4_PT')
+            w4_ct_dir = os.path.join(self.base_folder, 'week4_CT')
 
-            # Check Week 4
-            if self.scan_results.get('week4') and self.scan_results['week4'].get('PT_RTSS'):
-                ct4_dir = os.path.join(self.base_folder, 'week4_CT')
-                pt4_dir = os.path.join(self.base_folder, 'week4_PT')
-                if os.path.isdir(ct4_dir) and os.path.isdir(pt4_dir):
-                    w4_enabled = True
+            # Check Week 0 PT -> CT
+            if week0 and week0.get('PT_RTSS') and os.path.isdir(w0_pt_dir) and os.path.isdir(w0_ct_dir):
+                w0_pt_ct_enabled = True
 
-        self.copy_button_w0.setEnabled(w0_enabled)
-        self.copy_button_w4.setEnabled(w4_enabled)
-        logging.info(f"更新复制按钮状态: Week0={w0_enabled}, Week4={w4_enabled}")
+            # Check Week 4 PT -> CT
+            if week4 and week4.get('PT_RTSS') and os.path.isdir(w4_pt_dir) and os.path.isdir(w4_ct_dir):
+                w4_pt_ct_enabled = True
+
+            # Check Week 0 PT -> Week 4 PT (Transform)
+            if week0 and week0.get('PT_RTSS') and os.path.isdir(w0_pt_dir) and os.path.isdir(w4_pt_dir):
+                 w0pt_w4pt_tx_enabled = True
+
+        self.copy_button_w0.setEnabled(w0_pt_ct_enabled)
+        self.copy_button_w4.setEnabled(w4_pt_ct_enabled)
+        self.copy_button_w0w4_tx.setEnabled(w0pt_w4pt_tx_enabled) # 设置新按钮状态
+
+        logging.info(f"更新复制按钮状态: W0PT->CT={w0_pt_ct_enabled}, W4PT->CT={w4_pt_ct_enabled}, W0PT->W4PT_TX={w0pt_w4pt_tx_enabled}")
 
     def copy_week0_pt_to_ct(self):
         """执行将 Week0 PT RTSS 复制并适配到 Week0 CT 的操作"""
@@ -413,14 +473,130 @@ class RTSSCopier(QWidget):
         else:
             logging.info("用户取消了 Week4 复制操作。")
 
-    # def copy_rtss_files(self):
-    #     """执行复制操作（待实现）"""
-    #     if not self.scan_results:
-    #         QMessageBox.warning(self, "无结果", "请先选择文件夹并完成扫描。")
-    #         return
-    #     # TODO: 在这里实现将找到的 RTSS 文件复制到目标位置的逻辑
-    #     QMessageBox.information(self, "提示", "复制功能尚未实现。")
-    #     pass
+    def copy_w0pt_to_w4pt_with_transform(self):
+        """执行将 Week0 PT RTSS 复制并应用变换到 Week4 PT 的操作"""
+        if not self.scan_results or not self.base_folder:
+            QMessageBox.warning(self, "错误", "请先选择有效的患者文件夹并成功扫描。")
+            return
+
+        week0_results = self.scan_results.get('week0')
+        week4_results = self.scan_results.get('week4') # 需要 Week4 信息来确认目录
+
+        if not week0_results or not week4_results: # 确保 week0 和 week4 都有扫描结果
+            QMessageBox.warning(self, "错误", "扫描结果中缺少 Week0 或 Week4 的信息。")
+            return
+
+        source_rtss_path = week0_results.get('PT_RTSS')
+        if not source_rtss_path:
+            QMessageBox.warning(self, "缺少文件", "未在 Week0 PT 目录中找到 RTStruct 文件。")
+            return
+
+        # 构建源和目标系列目录路径 (目标是 W4 PT)
+        # 源 RTSS 路径已知，但 target_image_series_dir 是 W4 PT 目录
+        target_series_dir = os.path.join(self.base_folder, 'week4_PT')
+
+        # 检查目录是否存在
+        source_series_dir_check = os.path.dirname(source_rtss_path) # 源 RTSS 所在的目录 (应该是 week0_PT)
+        if not os.path.isdir(source_series_dir_check):
+            QMessageBox.critical(self, "目录错误", f"找不到源 RTSS 所在的目录: {source_series_dir_check}")
+            return
+        if not os.path.isdir(target_series_dir):
+            QMessageBox.critical(self, "目录错误", f"找不到目标 Week4 PT 目录: {target_series_dir}")
+            return
+
+        # --- 获取变换参数 --- 
+        try:
+            cx = self.transform_inputs['Cx'].value()
+            cy = self.transform_inputs['Cy'].value()
+            cz = self.transform_inputs['Cz'].value()
+            center = (cx, cy, cz)
+
+            rx_deg = self.transform_inputs['Rx'].value()
+            ry_deg = self.transform_inputs['Ry'].value()
+            rz_deg = self.transform_inputs['Rz'].value()
+            rotation_deg = (rx_deg, ry_deg, rz_deg) # 保持角度为度，核心函数会处理转换
+
+            tx = self.transform_inputs['Tx'].value()
+            ty = self.transform_inputs['Ty'].value()
+            tz = self.transform_inputs['Tz'].value()
+            translation = (tx, ty, tz)
+
+            logging.info("从 GUI 获取变换参数成功:")
+            logging.info(f"  Center: {center}")
+            logging.info(f"  Rotation (deg): {rotation_deg}")
+            logging.info(f"  Translation: {translation}")
+
+        except KeyError as e:
+             QMessageBox.critical(self, "内部错误", f"无法获取变换参数输入框: {e}")
+             return
+        except Exception as e:
+             QMessageBox.critical(self, "参数错误", f"读取变换参数时出错: {e}")
+             return
+        # --- 参数获取结束 ---
+
+        # 定义输出文件名和路径 (将在 target_series_dir 中创建)
+        output_filename = f"RS.{os.path.basename(target_series_dir)}_from_W0PT_Tx.dcm" # 例如 RS.week4_PT_from_W0PT_Tx.dcm
+        # 输出目录直接使用目标系列目录
+        output_dir = target_series_dir
+        # 完整的最终输出路径 (由核心函数内部处理复制到此位置)
+        final_output_path = os.path.join(output_dir, output_filename)
+
+        # 提示用户确认
+        reply = QMessageBox.question(self,
+                                     "确认操作 (带变换)",
+                                     f"将从 Week0 PT RTSS 复制 ROI:\n{source_rtss_path}\n\n" 
+                                     f"适配到 Week4 PT 系列:\n{target_series_dir}\n\n" 
+                                     f"并应用以下刚性变换:\n"
+                                     f"Center: ({cx:.2f}, {cy:.2f}, {cz:.2f})\n"
+                                     f"Rotation (°): ({rx_deg:.2f}, {ry_deg:.2f}, {rz_deg:.2f})\n"
+                                     f"Translation: ({tx:.2f}, {ty:.2f}, {tz:.2f})\n\n"
+                                     f"保存为:\n{final_output_path}\n\n是否继续？",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+
+        if reply == QMessageBox.Yes:
+            logging.info("用户确认 W0->W4 PT (带变换) 复制操作，开始执行...")
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            self.copy_button_w0w4_tx.setEnabled(False)
+            self.result_display.append("\n正在执行 Week0 PT -> Week4 PT (带变换) 复制...")
+            QApplication.processEvents()
+
+            try:
+                # *** 调用核心函数 ***
+                # 注意：我们不再需要传递 source_series_dir，核心函数会从 source_rtss_path 推断
+                # 也不需要传递 output_rtss_path，而是传递 output_dir 和 new_rtss_filename
+                copy_rtss_with_transform(
+                    source_rtss_path=source_rtss_path,
+                    target_image_series_dir=target_series_dir,
+                    output_dir=output_dir, # 目标系列目录作为输出目录
+                    rotation_center=center,
+                    rotation_angles_deg=rotation_deg, # 传递度数
+                    translation=translation,
+                    # roi_name="PTV", # 可以省略，核心函数会尝试处理所有ROI
+                    new_rtss_filename=output_filename
+                )
+                # 注意：copy_rtss_with_transform 抛出异常表示失败，不返回布尔值
+
+                # 如果代码执行到这里，表示没有抛出异常，即成功
+                QMessageBox.information(self, "成功", f"W0->W4 PT (带变换) RTStruct 已成功复制并保存到:\n{final_output_path}")
+                self.result_display.append("W0->W4 PT (带变换) 复制操作成功完成。")
+                # 可以在成功后重新扫描以刷新状态，但可能不是必须的
+                # self.select_folder() # 触发重新扫描
+
+            except FileNotFoundError as fnf_e:
+                 logging.error(f"复制 W0->W4 PT 时文件/目录未找到: {fnf_e}", exc_info=True)
+                 QMessageBox.critical(self, "文件错误", f"文件或目录未找到: {fnf_e}")
+                 self.result_display.append(f"复制操作失败：文件或目录未找到 - {fnf_e}")
+            except Exception as e:
+                # 捕获核心函数抛出的所有其他异常
+                logging.error(f"调用 W0->W4 PT (带变换) copy 函数时发生意外错误: {e}", exc_info=True)
+                QMessageBox.critical(self, "严重错误", f"执行 W0->W4 PT (带变换) 复制时发生错误: {e}")
+                self.result_display.append(f"W0->W4 PT (带变换) 复制操作因错误而中止: {e}")
+            finally:
+                QApplication.restoreOverrideCursor()
+                # 重新评估按钮状态（即使失败也可能需要）
+                self.update_copy_buttons_state()
+        else:
+            logging.info("用户取消了 W0->W4 PT (带变换) 复制操作。")
 
 # 为了能独立运行测试（如果需要）
 if __name__ == '__main__':

@@ -200,25 +200,24 @@ class RangeSlider(QWidget):
         
     def mousePressEvent(self, event):
         """处理鼠标按下事件"""
+        # 先将两个标志重置
+        self._moving_lower = False
+        self._moving_upper = False
+
         if hasattr(self, '_lower_handle') and hasattr(self, '_upper_handle'):
             # 判断点击的是哪个滑块
             if self._lower_handle.contains(event.pos()):
                 self._moving_lower = True
-                self._moving_upper = False
             elif self._upper_handle.contains(event.pos()):
-                self._moving_lower = False
                 self._moving_upper = True
-            else:
-                # 如果点击的是中间区域，判断离哪个滑块更近
-                pass
-            self._moving_lower = True
-            self._moving_upper = False
-        else:
-            self._moving_lower = False
-            self._moving_upper = True
-            
-                # 立即移动滑块到点击位置
-        self.mouseMoveEvent(event)
+
+        # 如果确实开始移动，可以立即调用 mouseMoveEvent 更新位置
+        # （可选，因为拖动时 mouseMoveEvent 会自动触发）
+        # if self._moving_lower or self._moving_upper:
+        #     self.mouseMoveEvent(event)
+
+        # 更新外观以显示按下的效果（例如辉光）
+        self.update()
         
     def mouseMoveEvent(self, event):
         """处理鼠标移动事件"""
@@ -230,29 +229,28 @@ class RangeSlider(QWidget):
                 # 计算鼠标位置对应的值
                 x = event.pos().x()
                 pos_ratio = max(0, min(1, (x - self._slider_left) / self._slider_width))
-        value = int(self._min_value + pos_ratio * (self._max_value - self._min_value))
-        
-        if self._moving_lower:
+                value = int(self._min_value + pos_ratio * (self._max_value - self._min_value))
+
+                if self._moving_lower:
                     # 确保下限不超过上限
-            value = min(value, self._upper)
-            if value != self._lower:
-                self._lower = value
-                self.lower_spinbox.setValue(value)
-                self.update()
-                self.rangeChanged.emit(self._lower, self._upper)
-            elif self._moving_upper:
-                # 确保上限不小于下限
-                pass
-            value = max(value, self._lower)
-            if value != self._upper:
-                self._upper = value
-                self.upper_spinbox.setValue(value)
-                self.update()
-                self.rangeChanged.emit(self._lower, self._upper)
-            else:
-                # 仅更新鼠标悬停效果
-                self.update()
-                
+                    value = min(value, self._upper)
+                    if value != self._lower:
+                        self._lower = value
+                        self.lower_spinbox.setValue(value)
+                        self.update()
+                        self.rangeChanged.emit(self._lower, self._upper)
+                if self._moving_upper:
+                    # 确保上限不小于下限
+                    value = max(value, self._lower)
+                    if value != self._upper:
+                        self._upper = value
+                        self.upper_spinbox.setValue(value)
+                        self.update()
+                        self.rangeChanged.emit(self._lower, self._upper)
+        else:
+            # 如果没有移动滑块，也需要更新以显示悬停效果
+            self.update()
+        
     def mouseReleaseEvent(self, event):
         """处理鼠标释放事件"""
         self._moving_lower = False
