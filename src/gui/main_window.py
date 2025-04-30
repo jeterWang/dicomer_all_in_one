@@ -7,6 +7,7 @@ from PyQt5.QtCore import Qt
 
 from .widgets.dicom_editor import DicomEditor
 from .widgets.dvf_viewer import DVFViewer
+from .modules.rtss_copier import RTSSCopier  # 导入RTSS复制器模块
 # 后续可以添加其他模块的导入
 
 class MainWindow(QMainWindow):
@@ -40,6 +41,7 @@ class MainWindow(QMainWindow):
         # 添加各个功能模块
         self.add_dicom_editor()
         self.add_dvf_viewer()
+        self.add_rtss_copier()  # 添加RTSS复制器
         # 后续可以添加其他模块
         
     def create_menu_bar(self):
@@ -61,6 +63,10 @@ class MainWindow(QMainWindow):
         dvf_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(1))
         tools_menu.addAction(dvf_action)
         
+        rtss_action = QAction('RTSS复制器', self)
+        rtss_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(2))
+        tools_menu.addAction(rtss_action)
+        
         # 帮助菜单
         help_menu = menubar.addMenu('帮助')
         about_action = QAction('关于', self)
@@ -76,6 +82,11 @@ class MainWindow(QMainWindow):
         """添加DVF查看器标签页"""
         dvf_viewer = DVFViewer()
         self.tab_widget.addTab(dvf_viewer, "DVF查看器")
+        
+    def add_rtss_copier(self):
+        """添加RTSS复制器标签页"""
+        rtss_copier = RTSSCopier()
+        self.tab_widget.addTab(rtss_copier, "RTSS复制器")
         
     def open_file(self):
         """打开文件"""

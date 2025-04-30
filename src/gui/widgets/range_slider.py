@@ -127,7 +127,7 @@ class RangeSlider(QWidget):
             selected_gradient = QLinearGradient(
                 selected_rect.topLeft(), 
                 selected_rect.bottomRight()
-            )
+        )
             selected_gradient.setColorAt(0, QColor(0, 120, 215))
             selected_gradient.setColorAt(1, QColor(30, 150, 245))
             
@@ -210,15 +210,15 @@ class RangeSlider(QWidget):
                 self._moving_upper = True
             else:
                 # 如果点击的是中间区域，判断离哪个滑块更近
-                if abs(event.pos().x() - self._lower_handle.center().x()) < abs(event.pos().x() - self._upper_handle.center().x()):
-                    self._moving_lower = True
-                    self._moving_upper = False
-                else:
-                    self._moving_lower = False
-                    self._moving_upper = True
-                    
+                pass
+            self._moving_lower = True
+            self._moving_upper = False
+        else:
+            self._moving_lower = False
+            self._moving_upper = True
+            
                 # 立即移动滑块到点击位置
-                self.mouseMoveEvent(event)
+        self.mouseMoveEvent(event)
         
     def mouseMoveEvent(self, event):
         """处理鼠标移动事件"""
@@ -230,24 +230,25 @@ class RangeSlider(QWidget):
                 # 计算鼠标位置对应的值
                 x = event.pos().x()
                 pos_ratio = max(0, min(1, (x - self._slider_left) / self._slider_width))
-                value = int(self._min_value + pos_ratio * (self._max_value - self._min_value))
-                
-                if self._moving_lower:
+        value = int(self._min_value + pos_ratio * (self._max_value - self._min_value))
+        
+        if self._moving_lower:
                     # 确保下限不超过上限
-                    value = min(value, self._upper)
-                    if value != self._lower:
-                        self._lower = value
-                        self.lower_spinbox.setValue(value)
-                        self.update()
-                        self.rangeChanged.emit(self._lower, self._upper)
-                elif self._moving_upper:
-                    # 确保上限不小于下限
-                    value = max(value, self._lower)
-                    if value != self._upper:
-                        self._upper = value
-                        self.upper_spinbox.setValue(value)
-                        self.update()
-                        self.rangeChanged.emit(self._lower, self._upper)
+            value = min(value, self._upper)
+            if value != self._lower:
+                self._lower = value
+                self.lower_spinbox.setValue(value)
+                self.update()
+                self.rangeChanged.emit(self._lower, self._upper)
+            elif self._moving_upper:
+                # 确保上限不小于下限
+                pass
+            value = max(value, self._lower)
+            if value != self._upper:
+                self._upper = value
+                self.upper_spinbox.setValue(value)
+                self.update()
+                self.rangeChanged.emit(self._lower, self._upper)
             else:
                 # 仅更新鼠标悬停效果
                 self.update()

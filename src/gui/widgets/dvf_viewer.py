@@ -408,7 +408,7 @@ class DVFViewer(QWidget):
             QMessageBox.critical(self, "错误", f"显示DVF时出错: {str(e)}")
             self.status_label.setText("出错")
             self.message_label.setText(f"显示DVF时出错: {str(e)}")
-            
+        
     # Week 0 控制槽
     @pyqtSlot(int, int)
     def on_w0_slice_range_changed(self, lower, upper):
