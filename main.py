@@ -1,6 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+# 本项目使用uv管理Python包
+# 安装uv: curl -sSf https://install.python-poetry.org | python3 -
+# 安装依赖: uv pip install -r requirements.txt
+
 import sys
 import logging
 import os
@@ -11,7 +15,7 @@ from src.gui.main_window import MainWindow
 # 配置基础日志记录
 log_format = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
 # 可以将日志级别设置为 INFO 以查看更详细的输出
-logging.basicConfig(level=logging.WARNING, format=log_format)
+logging.basicConfig(level=logging.INFO, format=log_format)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
