@@ -67,109 +67,6 @@ class ImageRigidMover(QObject):
         # 输出目录
         self.output_dir = None
     
-    def get_true_origin_from_slices(self, dicom_files):
-        """
-        通过遍历所有DICOM切片，获取真实的origin
-        按照DICOM的方向，找到z坐标最小的切片作为origin
-        
-        Args:
-            dicom_files: DICOM文件路径列表
-            
-        Returns:
-            Tuple[float, float, float]: 真实的origin坐标 (x, y, z)
-        """
-        try:
-            self.logger.info(f"开始分析 {len(dicom_files)} 个DICOM切片以确定真实origin")
-            print(f"开始分析 {len(dicom_files)} 个DICOM切片以确定真实origin")
-            
-            # 读取所有切片的ImagePositionPatient和其他空间信息
-            slice_data = []
-            
-            for file_path in dicom_files:
-                try:
-                    dcm = pydicom.dcmread(file_path, force=True, stop_before_pixels=True)
-                    if hasattr(dcm, 'ImagePositionPatient') and hasattr(dcm, 'ImageOrientationPatient'):
-                        position = dcm.ImagePositionPatient
-                        orientation = dcm.ImageOrientationPatient
-                        
-                        # 提取位置和方向信息
-                        pos = [float(position[0]), float(position[1]), float(position[2])]
-                        orient = [float(o) for o in orientation]
-                        
-                        # 保存信息
-                        slice_data.append({
-                            'file': file_path,
-                            'position': pos,
-                            'orientation': orient,
-                            'instance_number': int(getattr(dcm, 'InstanceNumber', 0))
-                        })
-                except Exception as e:
-                    self.logger.warning(f"读取DICOM文件 {file_path} 时出错: {e}")
-                    continue
-            
-            if not slice_data:
-                self.logger.warning("没有找到有效的DICOM切片空间信息")
-                return None
-                
-            # 检查是否所有切片的方向都相同
-            first_orientation = slice_data[0]['orientation']
-            all_same_orientation = all(
-                np.allclose(s['orientation'], first_orientation, rtol=1e-5, atol=1e-5) 
-                for s in slice_data
-            )
-            
-            if not all_same_orientation:
-                self.logger.warning("警告：不是所有切片都具有相同的方向信息")
-                print("警告：不是所有切片都具有相同的方向信息，将使用第一个切片的方向")
-            
-            # 根据方向计算z轴向量
-            # ImageOrientationPatient存储为[row_x, row_y, row_z, col_x, col_y, col_z]
-            row_vec = np.array(first_orientation[:3])
-            col_vec = np.array(first_orientation[3:])
-            
-            # z轴向量是行向量和列向量的叉积
-            z_vec = np.cross(row_vec, col_vec)
-            
-            # 归一化
-            z_vec = z_vec / np.linalg.norm(z_vec)
-            
-            self.logger.info(f"计算得到的z轴方向向量: {z_vec}")
-            print(f"计算得到的z轴方向向量: {z_vec}")
-            
-            # 计算每个切片位置在z轴上的投影
-            for slice_info in slice_data:
-                pos = np.array(slice_info['position'])
-                # 计算位置在z轴上的标量投影
-                z_proj = np.dot(pos, z_vec)
-                slice_info['z_projection'] = z_proj
-            
-            # 打印所有切片的z投影，帮助调试
-            print("\n切片Z轴投影值:")
-            for i, s in enumerate(slice_data[:min(5, len(slice_data))]):
-                print(f"切片 {i+1}/{len(slice_data)}: 位置={s['position']}, Z投影={s['z_projection']:.2f}")
-            if len(slice_data) > 5:
-                print(f"... 共有 {len(slice_data)} 个切片")
-            
-            # 按z轴投影排序
-            slice_data.sort(key=lambda x: x['z_projection'])
-            
-            # 选择z轴投影最小的切片作为origin
-            min_z_slice = slice_data[0]
-            
-            true_origin = min_z_slice['position']
-            
-            self.logger.info(f"找到的真实origin（来自z轴投影最小的切片）: {true_origin}")
-            print(f"找到的真实origin: ({true_origin[0]:.2f}, {true_origin[1]:.2f}, {true_origin[2]:.2f})")
-            print(f"来自文件: {os.path.basename(min_z_slice['file'])}")
-            print(f"实例编号: {min_z_slice['instance_number']}")
-            
-            return true_origin
-            
-        except Exception as e:
-            self.logger.error(f"获取切片真实origin时出错: {e}", exc_info=True)
-            print(f"获取切片真实origin时出错: {e}")
-            return None
-    
     def load_directory(self, directory: str, is_fixed: bool = True) -> Tuple[bool, str, Dict]:
         """
         加载目录中的DICOM图像和结构集
@@ -196,50 +93,101 @@ class ImageRigidMover(QObject):
             data_dict['image_info'] = {}
             data_dict['loaded'] = False
             
-            # 直接列出目录中的所有文件，不进行递归
-            try:
-                directory_contents = os.listdir(directory)
-                # 只保留文件，排除目录
-                file_names = [f for f in directory_contents if os.path.isfile(os.path.join(directory, f))]
-                # 计算目录中的实际文件数
-                actual_file_count = len(file_names)
-                # 转换为完整路径
-                dicom_candidates = [os.path.join(directory, f) for f in file_names]
-            except Exception as e:
-                self.logger.warning(f"列出目录内容时出错: {e}")
-                dicom_candidates = []
-                actual_file_count = 0
-            
-            # 如果没有找到文件，尝试使用glob搜索
-            if not dicom_candidates:
-                self.logger.info(f"尝试使用glob模式搜索DICOM文件")
-                for ext in ['.dcm', '.DCM', '']:
-                    pattern = os.path.join(directory, f"*{ext}")
-                    dicom_candidates.extend(glob.glob(pattern))
-                # 过滤掉目录
-                dicom_candidates = [f for f in dicom_candidates if os.path.isfile(f)]
-                actual_file_count = len(dicom_candidates)
-            
-            if not dicom_candidates:
-                msg = f"目录 {directory} 中未找到文件"
-                self.logger.warning(msg)
-                return False, msg, data_dict
+            # 检查目录是否存在
+            if not os.path.exists(directory):
+                return False, f"目录不存在: {directory}", data_dict
                 
-            self.logger.info(f"在目录 {directory} 中找到 {actual_file_count} 个文件")
-            self.progress_updated.emit(10, f"找到 {actual_file_count} 个文件")
+            # 尝试首先通过GDCM识别序列，这对变换后的序列特别有效
+            try:
+                self.logger.info("尝试使用GDCM识别DICOM序列...")
+                self.progress_updated.emit(20, "识别DICOM序列...")
+                
+                # 获取目录中的所有序列UID
+                series_ids = sitk.ImageSeriesReader.GetGDCMSeriesIDs(directory)
+                
+                if series_ids:
+                    self.logger.info(f"发现 {len(series_ids)} 个DICOM序列")
+                    
+                    # 使用第一个找到的序列
+                    series_id = series_ids[0]
+                    image_files = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(directory, series_id)
+                    
+                    if image_files:
+                        self.logger.info(f"使用序列 {series_id}, 包含 {len(image_files)} 个文件")
+                        data_dict['image_files'] = image_files
+                        
+                        # 检查RTSS文件
+                        dicom_candidates = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
+                        for file_name in dicom_candidates:
+                            file_path = os.path.join(directory, file_name)
+                            try:
+                                dcm = pydicom.dcmread(file_path, force=True, stop_before_pixels=True)
+                                if hasattr(dcm, 'SOPClassUID') and dcm.SOPClassUID == '1.2.840.10008.5.1.4.1.1.481.3':
+                                    data_dict['rtss_file'] = file_path
+                                    self.logger.info(f"找到RTSS文件: {file_path}")
+                                    break
+                            except Exception:
+                                pass
+                else:
+                    # 如果没有找到序列，使用标准的文件搜索方法
+                    self.logger.info("未通过GDCM找到序列，尝试标准文件搜索...")
+                    
+                    # 列出所有文件
+                    dicom_candidates = [os.path.join(directory, f) for f in os.listdir(directory) 
+                                      if os.path.isfile(os.path.join(directory, f))]
+                    
+                    # 对找到的文件进行分类
+                    image_files = []
+                    rtss_file = None
+                    
+                    for file_path in dicom_candidates:
+                        try:
+                            dcm = pydicom.dcmread(file_path, force=True, stop_before_pixels=True)
+                            
+                            # 检查是否为RTSS
+                            if hasattr(dcm, 'SOPClassUID') and dcm.SOPClassUID == '1.2.840.10008.5.1.4.1.1.481.3':
+                                rtss_file = file_path
+                                self.logger.info(f"找到RTSS文件: {file_path}")
+                            # 检查是否为医学图像(CT/MR/PT)
+                            elif hasattr(dcm, 'Modality') and dcm.Modality in ['CT', 'MR', 'PT']:
+                                image_files.append(file_path)
+                        except Exception:
+                            # 可能不是DICOM文件，忽略
+                            continue
+                    
+                    data_dict['image_files'] = image_files
+                    data_dict['rtss_file'] = rtss_file
+                    
+                    # 如果没有找到文件，使用glob搜索
+                    if not image_files:
+                        self.logger.info("尝试使用glob搜索DICOM文件...")
+                        for ext in ['.dcm', '.DCM', '']:
+                            pattern = os.path.join(directory, f"*{ext}")
+                            candidates = glob.glob(pattern)
+                            for file_path in candidates:
+                                if os.path.isfile(file_path):
+                                    try:
+                                        dcm = pydicom.dcmread(file_path, force=True, stop_before_pixels=True)
+                                        if hasattr(dcm, 'Modality') and dcm.Modality in ['CT', 'MR', 'PT']:
+                                            image_files.append(file_path)
+                                    except Exception:
+                                        continue
+                        
+                        data_dict['image_files'] = image_files
+            
+            except Exception as e:
+                self.logger.warning(f"GDCM序列识别失败: {e}，尝试标准文件搜索...")
+                
+                # 列出所有文件
+                dicom_candidates = [os.path.join(directory, f) for f in os.listdir(directory) 
+                                  if os.path.isfile(os.path.join(directory, f))]
             
             # 对找到的文件进行分类
             image_files = []
             rtss_file = None
             
-            # 读取每个文件查看其SOPClassUID
-            for i, file_path in enumerate(dicom_candidates):
+                for file_path in dicom_candidates:
                 try:
-                    # 更新进度
-                    if i % 10 == 0:
-                        progress = 10 + int(40 * i / len(dicom_candidates))
-                        self.progress_updated.emit(progress, f"分析DICOM文件 {i+1}/{len(dicom_candidates)}...")
-                    
                     dcm = pydicom.dcmread(file_path, force=True, stop_before_pixels=True)
                     
                     # 检查是否为RTSS
@@ -249,83 +197,49 @@ class ImageRigidMover(QObject):
                     # 检查是否为医学图像(CT/MR/PT)
                     elif hasattr(dcm, 'Modality') and dcm.Modality in ['CT', 'MR', 'PT']:
                         image_files.append(file_path)
-                except Exception as e:
+                    except Exception:
                     # 可能不是DICOM文件，忽略
                     continue
             
-            # 更新数据字典
             data_dict['image_files'] = image_files
             data_dict['rtss_file'] = rtss_file
             
-            # 记录有效的DICOM图像文件数
-            dicom_image_count = len(image_files)
-            self.logger.info(f"识别出 {dicom_image_count} 个有效的DICOM图像文件和 {1 if rtss_file else 0} 个RTSS文件")
-            
-            # 从DICOM切片获取真实origin
-            true_origin = None
-            if image_files:
-                # 从所有DICOM切片获取真实origin
-                self.progress_updated.emit(45, "计算DICOM序列的真实origin...")
-                true_origin = self.get_true_origin_from_slices(image_files)
-            
-            # 加载图像文件
-            if image_files:
-                self.progress_updated.emit(50, "加载DICOM图像序列...")
-                try:
+            # 检查是否找到图像文件
+            image_files = data_dict['image_files']
+            if not image_files:
+                return False, f"目录 {directory} 中未找到有效的DICOM图像文件", data_dict
+                
+            self.logger.info(f"找到 {len(image_files)} 个DICOM图像文件")
+            self.progress_updated.emit(40, f"找到 {len(image_files)} 个DICOM图像文件")
+                
+            # 尝试加载图像序列
+            try:
+                self.progress_updated.emit(60, "加载DICOM图像序列...")
+                
+                # 使用SimpleITK的序列读取器
                     reader = sitk.ImageSeriesReader()
                     reader.SetFileNames(image_files)
                     image = reader.Execute()
                     
-                    # 获取SimpleITK读取的原始origin
-                    sitk_origin = image.GetOrigin()
-                    self.logger.info(f"SimpleITK读取的原始origin: {sitk_origin}")
-                    print(f"SimpleITK读取的原始origin: {sitk_origin}")
-                    
-                    # 如果成功获取到了真实origin，使用它替换SimpleITK的origin
-                    if true_origin:
-                        self.logger.info(f"使用从DICOM切片计算的真实origin替换SimpleITK的origin")
-                        print(f"替换origin: 从 {sitk_origin} 到 {true_origin}")
-                        
-                        # 创建一个新的图像，复制原始图像的数据和属性，但使用真实origin
-                        # 获取原始图像数据
-                        image_array = sitk.GetArrayFromImage(image)
-                        
-                        # 创建新图像
-                        new_image = sitk.GetImageFromArray(image_array)
-                        new_image.SetSpacing(image.GetSpacing())
-                        new_image.SetDirection(image.GetDirection())
-                        new_image.SetOrigin(true_origin)
-                        
-                        # 保存替换了origin的图像
-                        data_dict['images'] = [new_image]
-                        data_dict['true_origin'] = true_origin
-                    else:
-                        # 如果无法获取真实origin，使用SimpleITK的origin
-                        self.logger.warning("无法获取真实origin，使用SimpleITK读取的origin")
-                        data_dict['images'] = [image]
-                        data_dict['true_origin'] = sitk_origin
-                    
-                    # 提取图像信息，确保file_count是实际的图像文件数量
+                data_dict['images'] = [image]
+                
+                # 提取图像信息
                     data_dict['image_info'] = {
                         'size': image.GetSize(),
                         'spacing': image.GetSpacing(),
-                        'origin': true_origin if true_origin else image.GetOrigin(),
-                        'sitk_origin': image.GetOrigin(),  # 保存SimpleITK读取的原始origin
+                        'origin': image.GetOrigin(),
                         'direction': image.GetDirection(),
-                        'file_count': dicom_image_count,  # 有效DICOM图像文件数
-                        'actual_file_count': actual_file_count,  # 目录中的实际文件总数
+                    'file_count': len(image_files),
                         'modality': self._get_image_modality(image_files[0])
                     }
                     
-                    self.logger.info(f"成功加载图像, 尺寸={image.GetSize()}, origin={data_dict['image_info']['origin']}")
+                self.logger.info(f"成功加载图像序列, 尺寸={image.GetSize()}, 原点={image.GetOrigin()}")
                 except Exception as e:
-                    msg = f"加载图像序列时出错: {e}"
-                    self.logger.error(msg)
-                    return False, msg, data_dict
-            else:
-                self.logger.warning("未找到图像文件")
+                self.logger.error(f"加载图像序列时出错: {e}")
+                return False, f"加载图像序列时出错: {e}", data_dict
             
             # 如果有RTSS，加载结构集
+            rtss_file = data_dict['rtss_file']
             if rtss_file:
                 self.progress_updated.emit(80, "加载RTSS结构集...")
                 try:
@@ -337,21 +251,15 @@ class ImageRigidMover(QObject):
                     # 继续处理，因为可以只有图像没有结构集
             
             # 更新加载状态
-            if data_dict['images']:
                 data_dict['loaded'] = True
                 self.progress_updated.emit(100, f"成功加载{'固定' if is_fixed else '移动'}图像")
-                self.logger.info(f"成功加载{'固定' if is_fixed else '移动'}图像数据")
                 
                 # 发送图像加载完成信号
                 data_to_emit = data_dict.copy()
                 data_to_emit['is_fixed'] = is_fixed  # 添加is_fixed标志
                 self.image_loaded.emit(data_to_emit)
                 
-                return True, "成功加载图像数据", data_dict
-            else:
-                msg = "未能成功加载图像数据"
-                self.logger.warning(msg)
-                return False, msg, data_dict
+            return True, f"成功加载{'固定' if is_fixed else '移动'}图像", data_dict
                 
         except Exception as e:
             msg = f"加载目录 {directory} 时出错: {e}"
@@ -503,7 +411,8 @@ class ImageRigidMover(QObject):
             print(f"Z轴原点差异: {origin_diff[2]:.2f} mm")
             print(f"Z轴平移参数: {tz:.2f} mm")
             print("确保GUI的Z轴平移范围足够大（±2000mm）以容纳这个差异")
-        
+            print("注意: 如果界面上显示的Z轴平移参数不是{tz:.2f}mm，请手动设置为这个值！")
+            
         print("=======================================\n")
         
     def perform_rigid_transform(self, output_dir: str, output_image=True, output_rtss=True) -> Tuple[bool, str]:
@@ -555,47 +464,52 @@ class ImageRigidMover(QObject):
                 moving_image = self.moving_data['images'][0]
                 fixed_image = self.fixed_data['images'][0]
                 
-                # 获取真实origin（如果有）
-                moving_true_origin = self.moving_data.get('true_origin')
-                fixed_true_origin = self.fixed_data.get('true_origin')
-                
                 # 使用控制台打印DEBUG信息，避免被警告覆盖
-                print("\n===== 执行刚体变换 =====")
-                print(f"Moving图像原点: {moving_image.GetOrigin()}")
-                if moving_true_origin:
-                    print(f"Moving真实原点: {moving_true_origin}")
-                print(f"Fixed图像原点: {fixed_image.GetOrigin()}")
-                if fixed_true_origin:
-                    print(f"Fixed真实原点: {fixed_true_origin}")
-                print(f"变换参数: 平移=({tx}, {ty}, {tz})mm")
+                self.print_debug_info(fixed_image, moving_image, tx, ty, tz)
                 
-                # 创建平移变换对象
-                print("\n===== 创建平移变换 =====")
-                transform = self._create_rigid_transform(tx, ty, tz, rx, ry, rz)
-                print(f"变换参数: {transform.GetParameters()}")
+                # 创建一个新的图像，复制moving_image的像素数据
+                # 注意：SimpleITK不允许直接修改图像的Origin，需要创建一个新的图像
+                moving_origin = moving_image.GetOrigin()
+                moving_spacing = moving_image.GetSpacing()
+                moving_direction = moving_image.GetDirection()
                 
-                # 重采样到fixed图像空间
+                # 计算调整后的origin（应用平移量）
+                adjusted_origin = (
+                    moving_origin[0] + tx,
+                    moving_origin[1] + ty,
+                    moving_origin[2] + tz
+                )
+                
+                print(f"\n===== 调整Origin =====")
+                print(f"原始Origin: {moving_origin}")
+                print(f"平移量: ({tx}, {ty}, {tz})mm")
+                print(f"调整后Origin: {adjusted_origin}")
+                print(f"Fixed Origin: {fixed_image.GetOrigin()}")
+                print(f"调整后与Fixed的Origin差异: {np.array(adjusted_origin) - np.array(fixed_image.GetOrigin())}")
+                
+                # 创建一个新的图像，复制moving_image但使用调整后的origin
+                # 因为不能直接修改SimpleITK图像的Origin，所以创建一个新的
+                adjusted_moving_image = sitk.Image(moving_image)
+                adjusted_moving_image.SetOrigin(adjusted_origin)
+                
+                # 使用恒等变换和fixed_image作为参考进行重采样
                 self.progress_updated.emit(30, "重采样到固定图像空间...")
                 print("===== 开始重采样 =====")
                 resampler = sitk.ResampleImageFilter()
                 resampler.SetReferenceImage(fixed_image)  # 使用fixed_image的尺寸和间距
                 resampler.SetInterpolator(sitk.sitkLinear)
                 resampler.SetDefaultPixelValue(0)
-                resampler.SetTransform(transform)
                 
-                transformed_image = resampler.Execute(moving_image)
+                # 使用恒等变换，因为我们已经调整了origin
+                identity_transform = sitk.Transform(3, sitk.sitkIdentity)
+                resampler.SetTransform(identity_transform)
+                
+                transformed_image = resampler.Execute(adjusted_moving_image)
                 
                 # 打印重采样后信息
                 print("===== 重采样完成 =====")
                 print(f"重采样后图像: origin={transformed_image.GetOrigin()}, spacing={transformed_image.GetSpacing()}, size={transformed_image.GetSize()}")
-                print(f"与Fixed对比: origin差异={np.array(transformed_image.GetOrigin()) - np.array(fixed_image.GetOrigin())}")
-                
-                # 检查图像内容
-                img_array = sitk.GetArrayFromImage(transformed_image)
-                non_zero = np.count_nonzero(img_array)
-                total_pixels = img_array.size
-                print(f"图像内容: 非零像素占比 {non_zero/total_pixels*100:.2f}%")
-                print(f"像素值范围: [{np.min(img_array)}, {np.max(img_array)}]")
+                print(f"与Fixed对比: origin差异={np.array(transformed_image.GetOrigin()) - np.array(fixed_image.GetOrigin())}\n\n")
                 
                 # 保存变换后的图像
                 self.progress_updated.emit(40, "正在保存变换后的图像...")
@@ -734,9 +648,8 @@ class ImageRigidMover(QObject):
     
     def _save_image_as_dicom(self, image: sitk.Image, output_dir: str, base_name: str, reference_dicom_file: str) -> Tuple[bool, str]:
         """
-        将图像保存为DICOM格式，只继承第一个参考DICOM的全局关键信息，重建像素和空间信息。
+        将图像保存为DICOM格式，确保所有切片被识别为同一个连续序列。
         保证所有图像切片属于同一序列，能被DICOM查看器作为一个序列加载。
-        使用正确的origin计算每个切片的ImagePositionPatient。
         """
         try:
             image_output_dir = os.path.join(output_dir, base_name)
@@ -757,12 +670,6 @@ class ImageRigidMover(QObject):
             original_modality = ref_dcm.get('Modality', 'CT')
             self.logger.info(f"原始图像模态: {original_modality}")
             print(f"原始图像模态: {original_modality}")
-            
-            # 打印origin信息用于调试
-            print(f"\n===== 保存DICOM图像 =====")
-            print(f"图像origin: {origin}")
-            print(f"方向矩阵: {direction}")
-            print(f"切片数量: {num_slices}")
 
             # 要保留的全局关键标签列表
             # 确保包含所有序列相关标签
@@ -774,6 +681,7 @@ class ImageRigidMover(QObject):
             ]
             
             # 生成一个新的Series UID 和 Frame of Reference UID，所有切片共用
+            study_uid = getattr(ref_dcm, 'StudyInstanceUID', pydicom.uid.generate_uid())
             new_series_uid = pydicom.uid.generate_uid()
             new_frame_of_reference_uid = pydicom.uid.generate_uid()
             series_number = getattr(ref_dcm, 'SeriesNumber', 1000)
@@ -786,37 +694,42 @@ class ImageRigidMover(QObject):
                 modality = 'PT'  # 确保使用标准模态代码
             elif modality == 'CT':
                 sop_class_uid = '1.2.840.10008.5.1.4.1.1.2'  # CT Image Storage
+            elif modality == 'MR':
+                sop_class_uid = '1.2.840.10008.5.1.4.1.1.4'  # MR Image Storage    
             else:
                 sop_class_uid = '1.2.840.10008.5.1.4.1.1.2'  # 默认为CT Image Storage
                 
             self.logger.info(f"使用模态: {modality}, SOPClassUID: {sop_class_uid}")
             print(f"使用模态: {modality}, SOPClassUID: {sop_class_uid}")
-            print(f"新序列UID: {new_series_uid}")
-            print(f"新帧参考UID: {new_frame_of_reference_uid}")
                 
             # 以升序命名文件，确保DICOM浏览器能正确排序
             # 使用统一的命名前缀，许多PACS系统依赖这种命名约定识别序列
             file_prefix = "IM"  # 标准DICOM命名前缀
             
-            # 计算所有切片的ImagePositionPatient，并按Z位置排序
+            # 预先计算所有切片的位置，以便正确排序
             slice_positions = []
             for i in range(num_slices):
-                position = self.compute_image_position(origin, direction, i, spacing)
-                # 仅使用Z坐标进行排序
-                slice_positions.append((i, position, position[2]))
-                if i < 3 or i >= num_slices - 3:
-                    print(f"切片 {i}: 位置={position}")
+                slice_pos = self.compute_image_position(origin, direction, i, spacing)[2]
+                slice_positions.append((i, slice_pos))
             
             # 按Z位置排序，确保切片按解剖位置排序
-            slice_positions.sort(key=lambda x: x[2])
-            slice_order = [idx for idx, _, _ in slice_positions]
-            is_ascending = slice_positions[0][2] < slice_positions[-1][2]
+            # 许多DICOM查看器依赖 ImagePositionPatient 的Z值递增或递减来确定顺序
+            slice_positions.sort(key=lambda x: x[1])
+            is_ascending = slice_positions[0][1] < slice_positions[-1][1]
+            
+            # 设置实例编号顺序，确保DICOM查看器能正确显示序列
+            if is_ascending:
+                instance_numbers = list(range(1, num_slices + 1))
+            else:
+                instance_numbers = list(range(num_slices, 0, -1))
             
             self.logger.info(f"保存DICOM序列，切片数: {num_slices}，顺序方向: {'升序' if is_ascending else '降序'}")
-            print(f"切片顺序方向: {'升序' if is_ascending else '降序'}")
+            
+            # 保存每个切片的路径，用于创建DICOMDIR
+            all_slice_paths = []
             
             # 保存每个切片
-            for slice_idx, (original_idx, position, _) in enumerate(slice_positions):
+            for idx, (original_idx, z_pos) in enumerate(slice_positions):
                 # 创建新的DICOM对象
                 dcm = pydicom.Dataset()
                 
@@ -826,6 +739,7 @@ class ImageRigidMover(QObject):
                         setattr(dcm, tag, getattr(ref_dcm, tag))
                 
                 # 设置序列相关信息 - 所有切片必须共享这些值
+                dcm.StudyInstanceUID = study_uid  # 确保所有切片共享相同的StudyInstanceUID
                 dcm.SeriesInstanceUID = new_series_uid
                 dcm.SeriesDescription = series_description
                 dcm.SeriesNumber = series_number
@@ -855,22 +769,26 @@ class ImageRigidMover(QObject):
                 # 设置图像空间信息
                 dcm.Rows = size[1]
                 dcm.Columns = size[0]
-                dcm.PixelSpacing = [spacing[1], spacing[0]]
+                dcm.PixelSpacing = [spacing[1], spacing[0]]  # 注意XY顺序
                 dcm.SliceThickness = spacing[2]
                 dcm.SpacingBetweenSlices = spacing[2]
                 
-                # 使用预先计算的位置信息
-                dcm.ImagePositionPatient = [float(v) for v in position]
+                # 计算当前切片的ImagePositionPatient
+                image_position = self.compute_image_position(origin, direction, original_idx, spacing)
+                dcm.ImagePositionPatient = [float(v) for v in image_position]
                 
                 # 设置图像方向
-                image_orientation = [direction[0], direction[3], direction[6], direction[1], direction[4], direction[7]]
+                image_orientation = [
+                    direction[0], direction[3], direction[6],  # 第一列
+                    direction[1], direction[4], direction[7]   # 第二列
+                ]
                 dcm.ImageOrientationPatient = [float(v) for v in image_orientation]
                 
-                # 设置切片位置
-                dcm.SliceLocation = float(position[2])
+                # 设置切片位置 - 这对序列排序至关重要
+                dcm.SliceLocation = float(z_pos)
                 
-                # 设置实例编号 - 按切片顺序递增，从1开始
-                dcm.InstanceNumber = slice_idx + 1
+                # 设置实例编号 - 按Z轴位置顺序递增或递减
+                dcm.InstanceNumber = instance_numbers[idx]
                 
                 # 设置切片数据
                 slice_data = image_array[original_idx, :, :]
@@ -885,7 +803,7 @@ class ImageRigidMover(QObject):
                     dcm.WindowWidth = ref_dcm.WindowWidth
                 else:
                     dcm.WindowCenter = (pixels_max + pixels_min) // 2
-                    dcm.WindowWidth = pixels_max - pixels_min
+                    dcm.WindowWidth = max(1, pixels_max - pixels_min)
                 
                 # 如果图像数据范围较小，可以使用16位整数
                 if pixels_min >= -32768 and pixels_max <= 32767:
@@ -896,22 +814,21 @@ class ImageRigidMover(QObject):
                     dcm.HighBit = 15
                     dcm.PixelRepresentation = 1  # 有符号整数
                 else:
-                    # 否则使用32位浮点数，需要转换为DICOM支持的格式
-                    # 找到合适的缩放比例
+                    # 使用缩放以适应16位范围
                     if pixels_min != pixels_max:
-                        rescale_slope = (pixels_max - pixels_min) / 65534
-                        rescale_intercept = pixels_min
+                        rescale_slope = (pixels_max - pixels_min) / 65534.0
+                        rescale_intercept = float(pixels_min)
                         # 使用缩放来适应16位范围
                         rescaled_data = (slice_data - rescale_intercept) / rescale_slope
                         # 四舍五入并限制在合理范围内
                         slice_data = np.clip(np.round(rescaled_data), 0, 65535).astype(np.uint16)
-                        dcm.RescaleSlope = float(rescale_slope)
-                        dcm.RescaleIntercept = float(rescale_intercept)
+                        dcm.RescaleSlope = rescale_slope
+                        dcm.RescaleIntercept = rescale_intercept
                     else:
                         # 如果所有像素值相同
                         slice_data = np.zeros_like(slice_data, dtype=np.uint16)
                         dcm.RescaleSlope = 1.0
-                        dcm.RescaleIntercept = pixels_min
+                        dcm.RescaleIntercept = float(pixels_min)
                     
                     dcm.BitsAllocated = 16
                     dcm.BitsStored = 16
@@ -926,10 +843,22 @@ class ImageRigidMover(QObject):
                 # 使用标准的DICOM文件命名约定，确保切片能正确排序
                 output_file = os.path.join(image_output_dir, f"{file_prefix}{slice_idx+1:04d}.dcm")
                 dcm.save_as(output_file)
+                all_slice_paths.append(output_file)
+            
+            # 尝试创建DICOMDIR索引文件，帮助某些DICOM查看器识别序列
+            try:
+                from pydicom.fileset import FileSet
+                from pydicom.uid import ExplicitVRLittleEndian
                 
-                # 打印前几个和最后几个切片的信息
-                if slice_idx < 3 or slice_idx >= num_slices - 3:
-                    print(f"保存切片 {slice_idx+1}/{num_slices}: 位置={position}, 文件={os.path.basename(output_file)}")
+                fs = FileSet()
+                for i in range(num_slices):
+                    file_path = os.path.join(image_output_dir, f"{file_prefix}{i+1:04d}.dcm")
+                    fs.add(file_path)
+                fs.write(os.path.join(image_output_dir, "DICOMDIR"))
+                self.logger.info("已创建DICOMDIR索引文件，帮助DICOM查看器识别序列")
+                print("已创建DICOMDIR索引文件，帮助DICOM查看器识别序列")
+            except Exception as e:
+                self.logger.warning(f"创建DICOMDIR文件失败(不影响使用): {e}")
             
             self.logger.info(f"成功将图像保存为DICOM序列，共 {num_slices} 个切片，保存到 {image_output_dir}")
             print(f"成功将图像保存为DICOM序列，共 {num_slices} 个切片，保存到 {image_output_dir}")
@@ -1029,7 +958,6 @@ class ImageRigidMover(QObject):
     def calculate_transform_from_centroids(self) -> Tuple[bool, str, Dict]:
         """
         根据固定和移动RTSS的质心差异，计算刚体变换参数
-        注意：平移应该是把moving图像变换到fixed图像位置
         
         Returns:
             Tuple[bool, str, Dict]: (成功标志, 消息, 变换参数字典)
@@ -1059,80 +987,71 @@ class ImageRigidMover(QObject):
             fixed_origin = fixed_image.GetOrigin()
             moving_origin = moving_image.GetOrigin()
             
-            # 详细打印原始值
-            print("\n【图像原点】")
-            print(f"Fixed图像原点: X={fixed_origin[0]:.2f}, Y={fixed_origin[1]:.2f}, Z={fixed_origin[2]:.2f}")
-            print(f"Moving图像原点: X={moving_origin[0]:.2f}, Y={moving_origin[1]:.2f}, Z={moving_origin[2]:.2f}")
-            print(f"!!! Z轴值: Fixed Z={fixed_origin[2]:.2f}, Moving Z={moving_origin[2]:.2f}")
-            
-            print("\n【轮廓质心】")
-            print(f"Fixed轮廓质心: X={fixed_centroid[0]:.2f}, Y={fixed_centroid[1]:.2f}, Z={fixed_centroid[2]:.2f}")
-            print(f"Moving轮廓质心: X={moving_centroid[0]:.2f}, Y={moving_centroid[1]:.2f}, Z={moving_centroid[2]:.2f}")
-            
-            # 计算将Moving图像变换到Fixed图像需要的参数
-            # 原点差异 (Moving需要向哪个方向移动才能让原点对齐)
-            # 正确方向: Fixed - Moving (表示Moving需要增加多少才能等于Fixed)
-            origin_diff_x = fixed_origin[0] - moving_origin[0]
-            origin_diff_y = fixed_origin[1] - moving_origin[1] 
-            origin_diff_z = fixed_origin[2] - moving_origin[2]  # Z轴可能有很大的差异
-            
-            print("\n【原点差异】(Fixed - Moving)")
-            print(f"X轴原点差异: {origin_diff_x:.2f}mm")
-            print(f"Y轴原点差异: {origin_diff_y:.2f}mm")
-            print(f"Z轴原点差异: {origin_diff_z:.2f}mm")
-            
-            # 质心差异 (将Moving轮廓配准到Fixed轮廓的平移量)
+            # 计算轮廓质心差异
             centroid_diff_x = fixed_centroid[0] - moving_centroid[0]
             centroid_diff_y = fixed_centroid[1] - moving_centroid[1]
             centroid_diff_z = fixed_centroid[2] - moving_centroid[2]
             
-            print("\n【质心差异】")
-            print(f"X轴质心差异: {centroid_diff_x:.2f}mm")
-            print(f"Y轴质心差异: {centroid_diff_y:.2f}mm")
-            print(f"Z轴质心差异: {centroid_diff_z:.2f}mm")
+            # 计算图像原点差异
+            origin_diff_x = fixed_origin[0] - moving_origin[0]
+            origin_diff_y = fixed_origin[1] - moving_origin[1]
+            origin_diff_z = fixed_origin[2] - moving_origin[2]
             
-            # 计算总平移量
+            # 计算总平移距离，考虑质心差异和原点差异
+            # 这些平移值将用于移动moving图像，使其与fixed图像对齐
             tx = centroid_diff_x + origin_diff_x
             ty = centroid_diff_y + origin_diff_y
             tz = centroid_diff_z + origin_diff_z
             
-            print("\n【平移计算】")
-            print(f"X平移 = 质心差异({centroid_diff_x:.2f}) + 原点差异({origin_diff_x:.2f}) = {tx:.2f}mm")
-            print(f"Y平移 = 质心差异({centroid_diff_y:.2f}) + 原点差异({origin_diff_y:.2f}) = {ty:.2f}mm")
-            print(f"Z平移 = 质心差异({centroid_diff_z:.2f}) + 原点差异({origin_diff_z:.2f}) = {tz:.2f}mm")
-            
-            # 检查大偏移并警告
-            if abs(origin_diff_z) > 500 or abs(tz) > 500:
-                print(f"\n!!! 警告: Z轴有大幅偏移 !!!")
-                print(f"Z轴移动: {tz:.2f}mm (从{moving_origin[2]:.2f}移动到约{moving_origin[2]+tz:.2f})")
-                print(f"这将使Moving Z轴从{moving_origin[2]:.2f}变为{moving_origin[2]+tz:.2f}，而Fixed Z轴是{fixed_origin[2]:.2f}")
-                print(f"确保GUI的Z轴平移范围设置为±2000mm")
-            
-            # 计算移动后的预期结果
-            predicted_new_origin = (
-                moving_origin[0] + tx,
-                moving_origin[1] + ty,
-                moving_origin[2] + tz
-            )
-            
-            print("\n【预测结果检验】")
-            print(f"移动后的预期原点: ({predicted_new_origin[0]:.2f}, {predicted_new_origin[1]:.2f}, {predicted_new_origin[2]:.2f})")
-            print(f"Fixed目标原点: ({fixed_origin[0]:.2f}, {fixed_origin[1]:.2f}, {fixed_origin[2]:.2f})")
-            print(f"与Fixed原点的偏差: ({predicted_new_origin[0]-fixed_origin[0]:.2f}, {predicted_new_origin[1]-fixed_origin[1]:.2f}, {predicted_new_origin[2]-fixed_origin[2]:.2f})")
-            
-            # 配置变换参数
-            rx, ry, rz = 0.0, 0.0, 0.0  # 默认不旋转
+            # 准备变换参数
             transform_params = {
                 'tx': tx, 'ty': ty, 'tz': tz,
-                'rx': rx, 'ry': ry, 'rz': rz
+                'rx': 0.0, 'ry': 0.0, 'rz': 0.0  # 默认不旋转
             }
+            
+            # 输出详细的调试信息
+            print("\n======== 详细计算刚体变换参数 ========")
+            print(f"固定图像原点: ({fixed_origin[0]:.2f}, {fixed_origin[1]:.2f}, {fixed_origin[2]:.2f})")
+            print(f"移动图像原点: ({moving_origin[0]:.2f}, {moving_origin[1]:.2f}, {moving_origin[2]:.2f})")
+            print(f"原点差异: X={origin_diff_x:.2f}mm, Y={origin_diff_y:.2f}mm, Z={origin_diff_z:.2f}mm")
+            
+            print(f"固定图像质心: ({fixed_centroid[0]:.2f}, {fixed_centroid[1]:.2f}, {fixed_centroid[2]:.2f})")
+            print(f"移动图像质心: ({moving_centroid[0]:.2f}, {moving_centroid[1]:.2f}, {moving_centroid[2]:.2f})")
+            print(f"质心差异: X={centroid_diff_x:.2f}mm, Y={centroid_diff_y:.2f}mm, Z={centroid_diff_z:.2f}mm")
+            
+            # 特别关注Z轴的大偏移
+            print(f"\n特别关注Z轴:")
+            print(f"Z轴原点差异: {origin_diff_z:.2f}mm (二者可能在不同的坐标系统)")
+            print(f"Z轴质心差异: {centroid_diff_z:.2f}mm (反映轮廓在不同扫描中的相对位置)")
+            print(f"Z轴总平移量: {tz:.2f}mm (二者叠加，确保考虑两个坐标系的差异)")
+            
+            # 输出详细计算过程
+            print(f"\n平移参数计算过程:")
+            print(f"X平移 = 质心X差异 + 原点X差异 = {centroid_diff_x:.2f} + {origin_diff_x:.2f} = {tx:.2f}mm")
+            print(f"Y平移 = 质心Y差异 + 原点Y差异 = {centroid_diff_y:.2f} + {origin_diff_y:.2f} = {ty:.2f}mm")
+            print(f"Z平移 = 质心Z差异 + 原点Z差异 = {centroid_diff_z:.2f} + {origin_diff_z:.2f} = {tz:.2f}mm")
+            
+            # 如果Z轴偏移很大，特别提醒
+            if abs(tz) > 500:
+                print("\n!!! 重要提示 !!!")
+                print(f"Z轴平移量 {tz:.2f}mm 非常大，请确保:")
+                print("1. GUI中Z轴平移滑块已设置为±2000mm范围")
+                print("2. 变换后查看结果验证对齐是否正确")
+                print("3. 如果界面上显示的Z轴平移参数不是上面计算的值，请手动设置！")
+            
+            # 目前我们只计算平移，不计算旋转
+            rx, ry, rz = 0.0, 0.0, 0.0
             
             # 更新变换参数
             self.set_transform_parameters(tx, ty, tz, rx, ry, rz)
             
             # 记录并返回结果
-            self.logger.info(f"计算得到变换参数: 平移=({tx:.2f}, {ty:.2f}, {tz:.2f})mm")
-            return True, f"已计算变换参数: 平移=({tx:.2f}, {ty:.2f}, {tz:.2f})mm", transform_params
+            message = f"已根据质心差异计算变换参数: 平移=({tx:.2f}, {ty:.2f}, {tz:.2f})mm"
+            if abs(tz) > 500:
+                message += f" - 注意Z轴偏移很大({tz:.2f}mm)!"
+                
+            self.logger.info(f"根据质心差异计算得到变换参数: 平移=({tx:.2f}, {ty:.2f}, {tz:.2f})mm")
+            return True, message, transform_params
             
         except Exception as e:
             error_msg = f"计算变换参数时出错: {e}"
@@ -1156,13 +1075,7 @@ class ImageRigidMover(QObject):
         direction_mat = np.array(direction).reshape(3, 3)
         
         # 计算Z方向的单位向量
-        # 方向矩阵的第三列表示Z方向
         z_unit = np.array([direction_mat[0, 2], direction_mat[1, 2], direction_mat[2, 2]])
-        
-        # 归一化Z方向向量（确保是单位向量）
-        z_norm = np.linalg.norm(z_unit)
-        if z_norm > 0:
-            z_unit = z_unit / z_norm
         
         # 计算当前切片的偏移量
         offset = slice_number * spacing[2] * z_unit

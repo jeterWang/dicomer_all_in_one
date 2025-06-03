@@ -560,7 +560,7 @@ class MainWindow(QMainWindow):
         transform_layout.addRow("Y平移:", self.ty_spin)
         
         self.tz_spin = QDoubleSpinBox()
-        self.tz_spin.setRange(-500, 500)
+        self.tz_spin.setRange(-2000, 2000)  # 修改范围为-2000~2000mm，支持更大的平移值
         self.tz_spin.setSingleStep(1.0)
         self.tz_spin.setSuffix(" mm")
         transform_layout.addRow("Z平移:", self.tz_spin)

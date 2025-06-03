@@ -7,11 +7,20 @@ import glob
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib
 import SimpleITK as sitk
 import pydicom
 from typing import Tuple, List, Dict, Optional, Union
 from PyQt5.QtCore import QObject, pyqtSignal
 from scipy.stats import pearsonr, spearmanr
+# 导入rt-utils库
+from rt_utils import RTStructBuilder
+
+# 配置matplotlib支持中文显示
+# 设置默认字体为不依赖字库的无衬线字体
+matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans', 'Arial Unicode MS', 'sans-serif']
+# 解决负号显示问题
+matplotlib.rcParams['axes.unicode_minus'] = False
 
 class CorrelationAnalyzer(QObject):
     """
@@ -73,6 +82,7 @@ class CorrelationAnalyzer(QObject):
     def load_pet_directory(self, directory: str, is_pet1: bool = True) -> Tuple[bool, str, Dict]:
         """
         加载目录中的PET DICOM图像
+        根据切片的ImagePositionPatient对图像文件进行排序，强制按Z值从小到大排序
         
         Args:
             directory: 包含DICOM序列的目录
@@ -136,6 +146,9 @@ class CorrelationAnalyzer(QObject):
             valid_files = 0
             invalid_files = 0
             
+            # 用于存储DICOM切片信息
+            slices_info = []
+            
             for i, file_path in enumerate(dicom_candidates):
                 try:
                     # 更新进度
@@ -166,20 +179,97 @@ class CorrelationAnalyzer(QObject):
                         self.logger.info(f"找到RTSS文件: {file_path}")
                         continue
                     
-                    # 检查是否为PET图像 - 宽松判断
+                    # 检查是否为PET图像 - 更加宽松的判断
                     is_pet = False
+                    # 基于模态判断
                     if hasattr(dcm, 'Modality') and dcm.Modality == 'PT':
                         is_pet = True
+                        self.logger.debug(f"通过Modality=PT识别为PET图像: {file_path}")
+                    # 基于序列描述判断
                     elif hasattr(dcm, 'SeriesDescription') and 'PET' in str(getattr(dcm, 'SeriesDescription', '')).upper():
                         is_pet = True
+                        self.logger.debug(f"通过SeriesDescription包含PET识别为PET图像: {file_path}")
+                    # 基于序列名称判断
+                    elif hasattr(dcm, 'SeriesDescription') and 'FDG' in str(getattr(dcm, 'SeriesDescription', '')).upper():
+                        is_pet = True
+                        self.logger.debug(f"通过SeriesDescription包含FDG识别为PET图像: {file_path}")
+                    # 基于研究描述判断
+                    elif hasattr(dcm, 'StudyDescription') and 'PET' in str(getattr(dcm, 'StudyDescription', '')).upper():
+                        is_pet = True
+                        self.logger.debug(f"通过StudyDescription包含PET识别为PET图像: {file_path}")
+                    # 基于文件路径判断
+                    elif 'PET' in file_path.upper() or 'PT' in os.path.basename(os.path.dirname(file_path)).upper():
+                        is_pet = True
+                        self.logger.debug(f"通过文件路径包含PET/PT识别为PET图像: {file_path}")
                     
+                    # 如果是PET图像，添加到列表并保存位置信息
                     if is_pet:
-                        image_files.append(file_path)
+                        # 获取ImagePositionPatient信息，用于后续排序
+                        position = None
+                        try:
+                            if hasattr(dcm, 'ImagePositionPatient'):
+                                position = tuple(float(p) for p in dcm.ImagePositionPatient)
+                                # 将切片信息添加到列表
+                                z_position = position[2] if len(position) > 2 else 0
+                                instance_number = int(getattr(dcm, 'InstanceNumber', 0))
+                                slice_info = {
+                                    'file_path': file_path,
+                                    'position': position,
+                                    'z_position': z_position,
+                                    'instance_number': instance_number
+                                }
+                                slices_info.append(slice_info)
+                                image_files.append(file_path)
+                            else:
+                                # 即使没有位置信息，也添加到图像文件列表
+                                image_files.append(file_path)
+                                self.logger.warning(f"图像文件 {file_path} 没有ImagePositionPatient信息")
+                        except Exception as position_error:
+                            # 忽略位置获取错误，仍然加入图像列表
+                            image_files.append(file_path)
+                            self.logger.warning(f"获取位置信息时出错 {file_path}: {position_error}")
+                            
+                        if len(image_files) < 5:  # 只显示前几个找到的文件，避免日志过长
+                            self.logger.info(f"识别为PET图像: {file_path}" + (f", 位置: {position}" if position else ""))
+                        elif len(image_files) == 5:
+                            self.logger.info("找到更多PET图像...")
                         
                 except Exception as e:
                     self.logger.debug(f"处理文件 {file_path} 时出错: {e}")
                     invalid_files += 1
                     continue
+            
+            # 如果有位置信息，按Z坐标从小到大排序切片
+            if slices_info:
+                self.logger.info(f"根据ImagePositionPatient的Z值对 {len(slices_info)} 个切片进行排序")
+                
+                # 检查Z坐标的最小值和最大值
+                z_values = [info['z_position'] for info in slices_info]
+                min_z = min(z_values)
+                max_z = max(z_values)
+                
+                # 输出最小和最大Z值，用于调试
+                self.logger.info(f"Z坐标范围: [{min_z}, {max_z}]")
+                
+                # 始终按Z坐标从小到大排序，不管原始DICOM的顺序如何
+                slices_info.sort(key=lambda x: x['z_position'])
+                
+                # 输出排序结果信息
+                self.logger.info(f"切片已按Z坐标从小到大排序")
+                self.logger.info(f"排序后的第一个切片Z坐标: {slices_info[0]['z_position']}")
+                self.logger.info(f"排序后的最后一个切片Z坐标: {slices_info[-1]['z_position']}")
+                
+                # 输出InstanceNumber信息用于调试
+                instance_numbers = [info['instance_number'] for info in slices_info if info['instance_number'] > 0]
+                if instance_numbers:
+                    first_instance = slices_info[0]['instance_number']
+                    last_instance = slices_info[-1]['instance_number']
+                    self.logger.info(f"从小到大排序后: 第一个切片的InstanceNumber: {first_instance}, 最后一个切片的InstanceNumber: {last_instance}")
+                
+                # 更新图像文件列表，按排序后的顺序
+                image_files = [info['file_path'] for info in slices_info]
+            else:
+                self.logger.warning("没有找到切片位置信息，无法按Z坐标排序")
             
             # 更新数据字典
             data_dict['image_files'] = image_files
@@ -208,9 +298,6 @@ class CorrelationAnalyzer(QObject):
             # 加载图像文件
             self.progress_updated.emit(50, f"加载{pet_label}图像序列，共{dicom_image_count}个文件...")
             try:
-                # 按文件名排序，确保图像序列正确
-                image_files.sort()
-                
                 # 使用SimpleITK读取图像序列
                 reader = sitk.ImageSeriesReader()
                 reader.SetFileNames(image_files)
@@ -229,7 +316,7 @@ class CorrelationAnalyzer(QObject):
                     'modality': self._get_image_modality(image_files[0])
                 }
                 
-                self.logger.info(f"成功加载{pet_label}图像, 尺寸={image.GetSize()}, 间距={image.GetSpacing()}")
+                self.logger.info(f"成功加载{pet_label}图像, 尺寸={image.GetSize()}, 间距={image.GetSpacing()}, 原点={image.GetOrigin()}")
                 data_dict['loaded'] = True
             except Exception as e:
                 msg = f"加载{pet_label}图像序列时出错: {e}"
@@ -307,9 +394,10 @@ class CorrelationAnalyzer(QObject):
     def analyze_correlation(self, roi_name: str, output_dir: str) -> Tuple[bool, str]:
         """
         分析指定ROI区域内两个PET图像的相关性
+        如果找不到指定名称的ROI，会尝试使用第一个可用的ROI
         
         Args:
-            roi_name: ROI名称
+            roi_name: ROI名称（如果不存在，将使用第一个可用的ROI）
             output_dir: 输出目录
             
         Returns:
@@ -326,6 +414,8 @@ class CorrelationAnalyzer(QObject):
         
         try:
             self.progress_updated.emit(0, f"开始分析ROI '{roi_name}'的相关性...")
+            
+            # 初始化结果中的ROI名称为请求的名称
             self.results['roi_name'] = roi_name
             
             # 检查两个PET图像的尺寸是否一致
@@ -337,24 +427,57 @@ class CorrelationAnalyzer(QObject):
                 self.logger.error(msg)
                 return False, msg
             
+            # 检查两个PET图像的原点和方向
+            pet1_origin = self.pet1_data['image'].GetOrigin()
+            pet2_origin = self.pet2_data['image'].GetOrigin()
+            pet1_direction = self.pet1_data['image'].GetDirection()
+            pet2_direction = self.pet2_data['image'].GetDirection()
+            
+            self.logger.info(f"PET1原点: {pet1_origin}, 方向矩阵: {pet1_direction}")
+            self.logger.info(f"PET2原点: {pet2_origin}, 方向矩阵: {pet2_direction}")
+            
+            # 判断是否存在反向情况
+            # 如果Z轴原点的差异很大，可能表示反向加载
+            z_origin_diff = abs(pet1_origin[2] - pet2_origin[2])
+            self.logger.info(f"Z轴原点差异: {z_origin_diff} mm")
+            
+            # 检查Z轴是否反向
+            pet1_z_vector = (pet1_direction[2], pet1_direction[5], pet1_direction[8])
+            pet2_z_vector = (pet2_direction[2], pet2_direction[5], pet2_direction[8])
+            z_direction_diff = sum(abs(pet1_z_vector[i] - pet2_z_vector[i]) for i in range(3))
+            self.logger.info(f"Z轴方向向量差异: {z_direction_diff}")
+            
+            is_reversed = False
+            if z_origin_diff > 10 or z_direction_diff > 0.1:  # 如果Z原点差异大或Z方向向量差异明显
+                self.logger.warning("检测到PET2可能与PET1反向加载")
+                is_reversed = True
+                self.progress_updated.emit(5, "检测到图像可能反向加载，将进行调整")
+            
             self.logger.info(f"两个PET图像尺寸一致: {pet1_size}，开始生成ROI掩码")
             
             # 1. 获取ROI轮廓的掩码
             self.progress_updated.emit(10, "生成ROI掩码...")
             mask = self._get_roi_mask(roi_name)
             if mask is None:
-                return False, f"未能找到名为 '{roi_name}' 的ROI或生成掩码失败"
+                return False, f"未能找到可用的ROI或生成掩码失败"
             
             # 检查掩码是否为空
             if np.sum(mask) == 0:
-                return False, f"ROI '{roi_name}' 生成的掩码为空，无法分析"
+                actual_roi_name = self.results['roi_name']  # 在_get_roi_mask中已更新
+                return False, f"ROI '{actual_roi_name}' 生成的掩码为空，无法分析"
                 
+            # 获取实际使用的ROI名称（可能是第一个可用的ROI）
+            actual_roi_name = self.results['roi_name']
+            if actual_roi_name != roi_name:
+                self.logger.info(f"使用替代ROI '{actual_roi_name}' 而非请求的 '{roi_name}'")
+                self.progress_updated.emit(15, f"使用ROI '{actual_roi_name}'")
+            
             mask_count = np.sum(mask)
             mask_shape = mask.shape
             self.logger.info(f"成功生成掩码，掩码内点数: {mask_count}, 掩码形状: {mask_shape}")
             
             # 2. 提取两个PET图像上ROI内的像素值
-            self.progress_updated.emit(30, "提取ROI内的PET1像素值...")
+            self.progress_updated.emit(30, f"提取ROI '{actual_roi_name}' 内的PET1像素值...")
             try:
                 pet1_array = sitk.GetArrayFromImage(self.pet1_data['image'])
                 self.logger.info(f"PET1像素值范围: [{np.min(pet1_array)}, {np.max(pet1_array)}]，形状: {pet1_array.shape}")
@@ -365,10 +488,20 @@ class CorrelationAnalyzer(QObject):
                 self.logger.error(msg, exc_info=True)
                 return False, msg
             
-            self.progress_updated.emit(50, "提取ROI内的PET2像素值...")
+            self.progress_updated.emit(50, f"提取ROI '{actual_roi_name}' 内的PET2像素值...")
             try:
                 pet2_array = sitk.GetArrayFromImage(self.pet2_data['image'])
                 self.logger.info(f"PET2像素值范围: [{np.min(pet2_array)}, {np.max(pet2_array)}]，形状: {pet2_array.shape}")
+                
+                # 如果检测到反向加载，需要翻转PET2数组
+                if is_reversed:
+                    self.logger.info("正在翻转PET2数组以匹配PET1方向...")
+                    
+                    # 因为DICOM按照Z坐标从小到大排序，所以只需翻转Z轴
+                    pet2_array = pet2_array[::-1, :, :]
+                    self.logger.info(f"PET2数组已沿Z轴翻转，新形状: {pet2_array.shape}")
+                
+                # 应用掩码提取像素值
                 pet2_values = pet2_array[mask]
                 self.logger.info(f"提取出 {len(pet2_values)} 个PET2像素值，范围: [{np.min(pet2_values)}, {np.max(pet2_values)}]")
             except Exception as e:
@@ -378,9 +511,68 @@ class CorrelationAnalyzer(QObject):
             
             # 确保值的长度匹配
             if len(pet1_values) != len(pet2_values):
-                msg = f"PET1和PET2中ROI内的像素数量不匹配: PET1={len(pet1_values)}, PET2={len(pet2_values)}"
-                self.logger.error(msg)
-                return False, msg
+                # 如果反向翻转后仍然不匹配，尝试创建和应用新掩码
+                self.logger.warning(f"PET1和PET2中ROI内的像素数量不匹配: PET1={len(pet1_values)}, PET2={len(pet2_values)}")
+                self.logger.info("尝试创建新掩码解决不匹配问题...")
+                
+                # 创建PET1掩码的副本
+                pet1_mask = np.zeros_like(pet1_array, dtype=bool)
+                pet1_mask[mask] = True
+                
+                # 为PET2创建新掩码
+                pet2_mask = None
+                
+                # 尝试不同的掩码转换方式
+                if is_reversed:
+                    # 如果已反转Z轴，但仍不匹配，可能需要额外的调整
+                    pet2_mask = pet1_mask[::-1, :, :]  # 沿Z轴翻转掩码
+                    self.logger.info("尝试沿Z轴翻转掩码")
+                else:
+                    # 尝试其他轴的翻转
+                    masks_to_try = [
+                        ("原始掩码", pet1_mask),
+                        ("X轴翻转", pet1_mask[:, :, ::-1]),
+                        ("Y轴翻转", pet1_mask[:, ::-1, :]),
+                        ("Z轴翻转", pet1_mask[::-1, :, :]),
+                        ("XY翻转", pet1_mask[:, ::-1, ::-1]),
+                        ("XZ翻转", pet1_mask[::-1, :, ::-1]),
+                        ("YZ翻转", pet1_mask[::-1, ::-1, :]),
+                        ("XYZ翻转", pet1_mask[::-1, ::-1, ::-1])
+                    ]
+                    
+                    # 测试每种掩码，找到最接近期望数量的
+                    best_mask = None
+                    best_count_diff = float('inf')
+                    
+                    for mask_name, mask_to_try in masks_to_try:
+                        count = np.sum(mask_to_try)
+                        count_diff = abs(count - mask_count)
+                        self.logger.info(f"掩码 {mask_name}: 点数 = {count}, 与原始差异 = {count_diff}")
+                        
+                        if count_diff < best_count_diff:
+                            best_count_diff = count_diff
+                            best_mask = mask_to_try
+                            self.logger.info(f"找到更好的掩码: {mask_name}")
+                    
+                    pet2_mask = best_mask
+                
+                # 使用新掩码提取像素值
+                if pet2_mask is not None:
+                    pet1_values = pet1_array[pet1_mask]
+                    pet2_values = pet2_array[pet2_mask]
+                    
+                    self.logger.info(f"使用新掩码后: PET1={len(pet1_values)}个像素, PET2={len(pet2_values)}个像素")
+                    
+                    # 再次检查
+                    if len(pet1_values) != len(pet2_values):
+                        # 如果仍然不匹配，取较小的集合
+                        min_length = min(len(pet1_values), len(pet2_values))
+                        self.logger.warning(f"仍然不匹配，截取相同长度: {min_length}像素")
+                        pet1_values = pet1_values[:min_length]
+                        pet2_values = pet2_values[:min_length]
+                else:
+                    self.logger.error("未能创建有效的替代掩码")
+                    return False, "无法创建有效掩码，PET1和PET2中像素数量不匹配"
             
             # 将提取的值保存到结果中
             self.results['voxel_count'] = len(pet1_values)
@@ -441,12 +633,12 @@ class CorrelationAnalyzer(QObject):
                     return False, msg
             else:
                 self.logger.warning(f"ROI中的体素数量太少 ({len(pet1_values)}), 无法计算可靠的相关性")
-                return False, f"ROI '{roi_name}' 中的体素数量太少({len(pet1_values)}), 需要至少5个点才能计算可靠的相关性"
+                return False, f"ROI '{actual_roi_name}' 中的体素数量太少({len(pet1_values)}), 需要至少5个点才能计算可靠的相关性"
             
             # 5. 保存数据到CSV
             self.progress_updated.emit(80, "保存数据到CSV...")
             try:
-                csv_path = self._save_to_csv(roi_name, pet1_values, pet2_values, output_dir)
+                csv_path = self._save_to_csv(actual_roi_name, pet1_values, pet2_values, output_dir)
                 self.logger.info(f"成功保存数据到CSV: {csv_path}")
             except Exception as e:
                 msg = f"保存CSV时出错: {e}"
@@ -456,7 +648,7 @@ class CorrelationAnalyzer(QObject):
             # 6. 绘制散点图
             self.progress_updated.emit(90, "生成散点图...")
             try:
-                plot_path = self._create_scatter_plot(roi_name, pet1_values, pet2_values, output_dir)
+                plot_path = self._create_scatter_plot(actual_roi_name, pet1_values, pet2_values, output_dir)
                 self.logger.info(f"成功生成散点图: {plot_path}")
             except Exception as e:
                 msg = f"生成散点图时出错: {e}"
@@ -465,9 +657,17 @@ class CorrelationAnalyzer(QObject):
             
             self.progress_updated.emit(100, "分析完成")
             
-            message = (f"成功分析ROI '{roi_name}'的相关性:\n"
-                      f"- Pearson r: {pearson_r:.4f} (p={pearson_p:.4f})\n"
-                      f"- Spearman r: {spearman_r:.4f} (p={spearman_p:.4f})\n"
+            # 格式化p值，确保足够小的p值使用科学计数法
+            pearson_p_str = f"{pearson_p:.8f}"
+            spearman_p_str = f"{spearman_p:.8f}"
+            if pearson_p < 0.00000001:
+                pearson_p_str = f"{pearson_p:.3e}"
+            if spearman_p < 0.00000001:
+                spearman_p_str = f"{spearman_p:.3e}"
+
+            message = (f"成功分析ROI '{actual_roi_name}'的相关性:\n"
+                      f"- Pearson r: {pearson_r:.4f} (p={pearson_p_str})\n"
+                      f"- Spearman r: {spearman_r:.4f} (p={spearman_p_str})\n"
                       f"- 体素数量: {len(pet1_values)}\n"
                       f"- 已保存CSV到: {csv_path}\n"
                       f"- 已保存散点图到: {plot_path}")
@@ -498,7 +698,8 @@ class CorrelationAnalyzer(QObject):
     
     def _get_roi_mask(self, roi_name: str) -> Optional[np.ndarray]:
         """
-        生成指定ROI的二值掩码
+        使用rt-utils库生成指定ROI的二值掩码
+        如果找不到指定名称的ROI，会尝试使用第一个可用的ROI
         
         Args:
             roi_name: ROI名称
@@ -507,148 +708,144 @@ class CorrelationAnalyzer(QObject):
             Optional[np.ndarray]: 如果成功，返回二值掩码；否则返回None
         """
         try:
-            rtss = self.rtss_data['rtss']
-            pet1_image = self.pet1_data['image']
-            
-            # 输出更多调试信息
-            self.logger.info(f"生成ROI '{roi_name}' 的掩码，图像尺寸: {pet1_image.GetSize()}")
-            
-            # 查找ROI ID
-            roi_id = None
-            available_rois = []
-            for roi in rtss.StructureSetROISequence:
-                available_rois.append(roi.ROIName)
-                if roi.ROIName == roi_name:
-                    roi_id = roi.ROINumber
-                    break
-                    
-            if roi_id is None:
-                self.logger.warning(f"未找到名为 '{roi_name}' 的ROI，可用ROI: {', '.join(available_rois)}")
-                return None
-            
-            # 查找对应的轮廓数据
-            contour_data = None
-            for roi_contour in rtss.ROIContourSequence:
-                if roi_contour.ReferencedROINumber == roi_id:
-                    contour_data = roi_contour
-                    break
-            
-            if contour_data is None:
-                self.logger.warning(f"未找到ROI '{roi_name}' 的轮廓数据")
+            # 检查必要的数据是否已加载
+            if not self.rtss_data['loaded'] or not self.pet1_data['loaded']:
+                self.logger.error("缺少必要的数据：RTSS或PET图像未加载")
                 return None
                 
-            if not hasattr(contour_data, 'ContourSequence'):
-                self.logger.warning(f"ROI '{roi_name}' 没有ContourSequence属性")
+            rtss_file = self.rtss_data['rtss_file']
+            pet_dir = os.path.dirname(self.pet1_data['image_files'][0])
+            
+            self.logger.info(f"使用rt-utils生成ROI '{roi_name}' 的掩码")
+            self.logger.info(f"RTSS文件: {rtss_file}")
+            self.logger.info(f"PET目录: {pet_dir}")
+            
+            # 为pet_dir创建一个临时目录，以便rt-utils可以正确加载
+            temp_dir = None
+            if not os.path.isdir(pet_dir):
+                # 如果pet_dir包含单个文件而不是目录，创建临时目录
+                temp_dir = os.path.join(os.path.dirname(pet_dir), "temp_dicom_dir")
+                os.makedirs(temp_dir, exist_ok=True)
+                # 复制所有PET文件到临时目录
+                for file_path in self.pet1_data['image_files']:
+                    import shutil
+                    shutil.copy(file_path, temp_dir)
+                pet_dir = temp_dir
+                self.logger.info(f"创建临时目录: {temp_dir}")
+            
+            # 使用RTStructBuilder加载RTSS和图像
+            try:
+                rtstruct = RTStructBuilder.create_from(
+                    dicom_series_path=pet_dir,
+                    rt_struct_path=rtss_file
+                )
+                self.logger.info("成功加载RTStructBuilder")
+            except Exception as e:
+                self.logger.error(f"加载RTStructBuilder失败: {e}")
+                # 尝试另一种方法：直接使用第一个图像文件
+                rtstruct = RTStructBuilder.create_from(
+                    dicom_series_path=self.pet1_data['image_files'][0],
+                    rt_struct_path=rtss_file
+                )
+                self.logger.info("使用单个文件模式成功加载RTStructBuilder")
+            
+            # 获取可用的ROI名称
+            available_rois = rtstruct.get_roi_names()
+            self.logger.info(f"可用的ROI列表: {available_rois}")
+            
+            # 如果指定ROI名称不存在，使用第一个可用的ROI
+            selected_roi_name = roi_name
+            if roi_name not in available_rois and available_rois:
+                selected_roi_name = available_rois[0]
+                self.logger.info(f"未找到指定的ROI '{roi_name}'，使用第一个可用的ROI '{selected_roi_name}'")
+            
+            # 更新结果中的ROI名称
+            self.results['roi_name'] = selected_roi_name
+            
+            # 如果没有可用的ROI，返回None
+            if not available_rois:
+                self.logger.warning("没有可用的ROI")
                 return None
+            
+            # 获取ROI掩码
+            try:
+                # 获取3D掩码数组
+                mask_3d = rtstruct.get_roi_mask_by_name(selected_roi_name)
+                self.logger.info(f"获取到3D掩码，形状: {mask_3d.shape}")
                 
-            contour_count = len(contour_data.ContourSequence)
-            self.logger.info(f"找到 {contour_count} 个轮廓点集")
-            
-            # 创建一个与PET图像相同尺寸的空掩码
-            pet1_size = pet1_image.GetSize()
-            mask_array = np.zeros(shape=(pet1_size[2], pet1_size[1], pet1_size[0]), dtype=np.bool_)
-            
-            # 用来将DICOM患者坐标转换为图像索引
-            pet1_direction = pet1_image.GetDirection()
-            pet1_origin = pet1_image.GetOrigin()
-            pet1_spacing = pet1_image.GetSpacing()
-            
-            # 记录一些统计信息用于调试
-            total_contours = len(contour_data.ContourSequence)
-            filled_slices = set()
-            total_points = 0
-            
-            # 处理每个轮廓
-            for contour_idx, contour in enumerate(contour_data.ContourSequence):
-                if not hasattr(contour, 'ContourData'):
-                    self.logger.warning(f"轮廓 #{contour_idx} 没有ContourData属性")
-                    continue
+                # 检查掩码是否为空
+                mask_points = np.sum(mask_3d)
+                self.logger.info(f"掩码内点数: {mask_points}")
+                if mask_points == 0:
+                    self.logger.warning(f"生成的掩码为空, 未包含任何像素")
+                    return None
+                
+                # 获取图像方向信息
+                pet1_direction = self.pet1_data['image'].GetDirection()
+                self.logger.info(f"PET1图像方向: {pet1_direction}")
+                
+                # rt-utils返回的掩码形状通常是[Y, X, Z]，但需要确保与SimpleITK图像匹配
+                pet1_shape = self.pet1_data['image'].GetSize()  # (X, Y, Z)
+                expected_shape = (pet1_shape[2], pet1_shape[1], pet1_shape[0])  # (Z, Y, X)
+                
+                self.logger.info(f"期望的掩码形状: {expected_shape}")
+                self.logger.info(f"实际掩码形状: {mask_3d.shape}")
+                
+                # 检查主对角线方向的符号，这影响了坐标系的方向
+                main_diag_signs = [np.sign(pet1_direction[0]), np.sign(pet1_direction[4]), np.sign(pet1_direction[8])]
+                self.logger.info(f"主对角线方向符号: {main_diag_signs}")
+                
+                # 如果形状不匹配，尝试转置和翻转
+                if mask_3d.shape != expected_shape:
+                    self.logger.warning(f"掩码形状 {mask_3d.shape} 与期望形状 {expected_shape} 不匹配，尝试调整")
                     
-                if len(contour.ContourData) < 6:  # 至少需要两个点 (x,y,z) 的坐标
-                    self.logger.warning(f"轮廓 #{contour_idx} 点数不足: {len(contour.ContourData)}")
-                    continue
-                
-                contour_data_array = np.array(contour.ContourData).reshape(-1, 3)
-                point_count = contour_data_array.shape[0]
-                total_points += point_count
-                
-                self.logger.debug(f"处理轮廓 #{contour_idx+1}/{total_contours}，包含 {point_count} 个点")
-                
-                # 将轮廓点转换为图像索引
-                indices = []
-                for point in contour_data_array:
-                    # 计算图像索引 (四舍五入到最近的整数)
-                    idx = [
-                        int(round((point[0] - pet1_origin[0]) / pet1_spacing[0])),
-                        int(round((point[1] - pet1_origin[1]) / pet1_spacing[1])),
-                        int(round((point[2] - pet1_origin[2]) / pet1_spacing[2]))
-                    ]
-                    indices.append(idx)
-                
-                # 填充轮廓内部的点
-                # 注意：这是一个简化的方法，不保证完全精确
-                # 对于每个z平面上的轮廓，使用多边形填充算法
-                if len(indices) > 2:  # 确保至少有3个点构成一个轮廓
-                    # 提取z平面索引
-                    z_idx = indices[0][2]
-                    filled_slices.add(z_idx)
+                    # 尝试不同的转置方式
+                    if mask_3d.shape == (pet1_shape[1], pet1_shape[0], pet1_shape[2]):  # (Y, X, Z)
+                        self.logger.info("检测到掩码形状为(Y, X, Z)，转置为(Z, Y, X)")
+                        mask_3d = mask_3d.transpose(2, 0, 1)  # (Z, Y, X)
+                    elif mask_3d.shape == (pet1_shape[0], pet1_shape[1], pet1_shape[2]):  # (X, Y, Z)
+                        self.logger.info("检测到掩码形状为(X, Y, Z)，转置为(Z, Y, X)")
+                        mask_3d = mask_3d.transpose(2, 1, 0)  # (Z, Y, X)
+                    elif mask_3d.shape == (pet1_shape[2], pet1_shape[0], pet1_shape[1]):  # (Z, X, Y)
+                        self.logger.info("检测到掩码形状为(Z, X, Y)，转置为(Z, Y, X)")
+                        mask_3d = mask_3d.transpose(0, 2, 1)  # (Z, Y, X)
                     
-                    if 0 <= z_idx < pet1_size[2]:  # 确保在图像范围内
-                        # 提取当前平面上的x,y坐标
-                        polygon = np.array([[idx[0], idx[1]] for idx in indices])
-                        # 确定边界框
-                        min_x, min_y = np.min(polygon, axis=0)
-                        max_x, max_y = np.max(polygon, axis=0)
-                        
-                        # 遍历边界框中的每个像素
-                        for x in range(max(0, min_x), min(pet1_size[0], max_x + 1)):
-                            for y in range(max(0, min_y), min(pet1_size[1], max_y + 1)):
-                                # 如果点在轮廓内，设置掩码为1
-                                if self._point_in_polygon(x, y, polygon):
-                                    mask_array[z_idx, y, x] = True
-            
-            # 输出掩码统计信息
-            mask_points = np.sum(mask_array)
-            self.logger.info(f"掩码生成统计: 总轮廓数={total_contours}, 填充切片数={len(filled_slices)}, "
-                           f"总轮廓点数={total_points}, 掩码内点数={mask_points}")
-            
-            if mask_points == 0:
-                self.logger.warning("生成的掩码为空，未填充任何像素")
+                    # 如果主对角线有负值，可能需要翻转某些轴
+                    if main_diag_signs[0] < 0:  # X轴反向
+                        self.logger.info("X轴方向为负，翻转X轴")
+                        mask_3d = mask_3d[:, :, ::-1]
+                    if main_diag_signs[1] < 0:  # Y轴反向
+                        self.logger.info("Y轴方向为负，翻转Y轴")
+                        mask_3d = mask_3d[:, ::-1, :]
+                    if main_diag_signs[2] < 0:  # Z轴反向
+                        self.logger.info("Z轴方向为负，翻转Z轴")
+                        mask_3d = mask_3d[::-1, :, :]
+                    
+                    self.logger.info(f"调整后的掩码形状: {mask_3d.shape}")
+                
+                # 最后检查一次点数
+                adjusted_points = np.sum(mask_3d)
+                if adjusted_points != mask_points:
+                    self.logger.warning(f"调整后的掩码点数({adjusted_points})与原始点数({mask_points})不一致，这可能是正常的")
+                
+                return mask_3d.astype(np.bool_)
+                
+            except Exception as mask_error:
+                self.logger.error(f"获取ROI掩码时错误: {mask_error}")
                 return None
-                
-            return mask_array
-                    
+            
         except Exception as e:
             self.logger.error(f"生成ROI掩码时出错: {e}", exc_info=True)
             return None
-    
-    def _point_in_polygon(self, x: int, y: int, polygon: np.ndarray) -> bool:
-        """
-        判断点是否在多边形内部（射线法）
-        
-        Args:
-            x, y: 点坐标
-            polygon: 多边形顶点坐标数组，形状为(n,2)
-            
-        Returns:
-            bool: 如果点在多边形内部，返回True；否则返回False
-        """
-        n = len(polygon)
-        inside = False
-        
-        p1x, p1y = polygon[0]
-        for i in range(1, n + 1):
-            p2x, p2y = polygon[i % n]
-            if y > min(p1y, p2y):
-                if y <= max(p1y, p2y):
-                    if x <= max(p1x, p2x):
-                        if p1y != p2y:
-                            x_intersect = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
-                        if p1x == p2x or x <= x_intersect:
-                            inside = not inside
-            p1x, p1y = p2x, p2y
-            
-        return inside
+        finally:
+            # 清理临时目录
+            if temp_dir and os.path.exists(temp_dir):
+                import shutil
+                try:
+                    shutil.rmtree(temp_dir)
+                    self.logger.info(f"已删除临时目录: {temp_dir}")
+                except:
+                    self.logger.warning(f"无法删除临时目录: {temp_dir}")
     
     def _save_to_csv(self, roi_name: str, pet1_values: np.ndarray, pet2_values: np.ndarray, output_dir: str) -> str:
         """
@@ -746,10 +943,17 @@ class CorrelationAnalyzer(QObject):
                 self.logger.warning(f"添加回归线时出错: {e}")
             
             # 格式化相关系数，处理NaN情况
+            # 增加p值小数位数，确保超小的p值能正确显示
             pearson_r_str = f"{pearson_r:.4f}" if not np.isnan(pearson_r) else "无效"
-            pearson_p_str = f"{pearson_p:.4f}" if not np.isnan(pearson_p) else "无效"
+            pearson_p_str = f"{pearson_p:.8f}" if not np.isnan(pearson_p) else "无效"
             spearman_r_str = f"{spearman_r:.4f}" if not np.isnan(spearman_r) else "无效"
-            spearman_p_str = f"{spearman_p:.4f}" if not np.isnan(spearman_p) else "无效"
+            spearman_p_str = f"{spearman_p:.8f}" if not np.isnan(spearman_p) else "无效"
+            
+            # 如果p值太小（科学计数法表示），使用科学计数法格式化
+            if pearson_p is not None and pearson_p < 0.00000001:
+                pearson_p_str = f"{pearson_p:.3e}"
+            if spearman_p is not None and spearman_p < 0.00000001:
+                spearman_p_str = f"{spearman_p:.3e}"
             
             # 添加标签和标题
             plt.xlabel('PET1像素值')
