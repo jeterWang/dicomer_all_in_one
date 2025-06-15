@@ -17,6 +17,7 @@ from .modules.rtss_copier import RTSSCopier  # 导入RTSS复制器模块
 from src.modules.dvf_applier import DVFApplier  # 导入DVF应用器模块
 from src.modules.image_regid_mover import ImageRigidMover  # 导入刚体位移模块
 from src.modules.correlation_analyzer import CorrelationAnalyzer  # 导入相关性分析模块
+from src.modules.drm_converter.drm_converter_gui import DRMConverterGUI  # 导入DRM转换器模块
 # 后续可以添加其他模块的导入
 
 class MainWindow(QMainWindow):
@@ -54,6 +55,7 @@ class MainWindow(QMainWindow):
         self.add_dvf_pet_applicator_tab() # 添加DVF应用器标签页
         self.add_image_rigid_mover_tab() # 添加刚体位移标签页
         self.add_correlation_analyzer_tab() # 添加相关性分析标签页
+        self.add_drm_converter_tab()  # 添加DRM转换器标签页
         # 后续可以添加其他模块
         
     def create_menu_bar(self):
@@ -1263,3 +1265,8 @@ class MainWindow(QMainWindow):
                 self.correlation_log_message(f"已设置默认输出目录: {default_output_dir}")
             except Exception as e:
                 self.correlation_log_message(f"无法创建默认输出目录: {e}") 
+
+    def add_drm_converter_tab(self):
+        """添加DRM转换器标签页"""
+        drm_converter_gui = DRMConverterGUI()
+        self.tab_widget.addTab(drm_converter_gui, "DRM转换器") 
