@@ -223,7 +223,7 @@ class DRMConverter:
         
         # 创建file_meta信息
         file_meta = pydicom.FileMetaDataset()
-        file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.128"  # PET Image Storage
+        file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.4"  # CT Image Storage
         file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
         file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
         file_meta.ImplementationVersionName = "PYDICOM " + pydicom.__version__
@@ -237,7 +237,7 @@ class DRMConverter:
         new_ds.FrameOfReferenceUID = series_uids['frame_of_reference_uid']
         
         # 更新特定字段
-        new_ds.Modality = "PT"
+        new_ds.Modality = "MR"
         new_ds.SeriesDescription = "OGSE"
         new_ds.SeriesNumber = str(int(template_ds.SeriesNumber) + 1000) if hasattr(template_ds, 'SeriesNumber') else "1000"
         new_ds.InstanceNumber = str(slice_index + 1)
