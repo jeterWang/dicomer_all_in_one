@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 import SimpleITK as sitk
 from datetime import datetime
+import glob
+from rt_utils import RTStructBuilder
 
 
 class DRMConverter:
@@ -189,13 +191,12 @@ class DRMConverter:
             drm_data_slice: DRM数据切片
             z_position: Z轴位置
             series_uids: series相关的UID字典
-            
+        
         Returns:
             pydicom.Dataset: 新的DICOM数据集
         """
         # 创建新的数据集
         new_ds = pydicom.Dataset()
-        
         # 复制基本信息（排除像素数据和file_meta相关的元素）
         exclude_tags = [
             pydicom.tag.Tag('7fe0', '0010'),  # 像素数据
@@ -216,14 +217,52 @@ class DRMConverter:
             pydicom.tag.Tag('0008', '0018'),  # SOPInstanceUID
             pydicom.tag.Tag('0008', '103e'),  # SeriesDescription
         ]
-        
         for element in template_ds:
             if element.tag not in exclude_tags:
                 new_ds[element.tag] = element
+
+        # OGSE白名单字段（仅这些从OGSE模板覆盖）
+        ogse_fields = [
+            ('0008','103e'), # Series Description
+            ('0018','1030'), # Protocol Name
+            ('0018','0020'), # Scanning Sequence
+            ('0018','0021'), # Sequence Variant
+            ('0018','0022'), # Scan Options
+            ('0018','0023'), # MR Acquisition Type
+            ('0018','1314'), # Flip Angle
+            ('0018','1316'), # SAR
+            ('0018','1318'), # dB/dt
+            ('0018','0080'), # Repetition Time
+            ('0018','0081'), # Echo Time
+            ('0018','0083'), # Number of Averages
+            ('0018','0087'), # Magnetic Field Strength
+            ('0018','0088'), # Spacing Between Slices
+            ('0018','5100'), # Patient Position
+            ('0028','1050'), # Window Center
+            ('0028','1051'), # Window Width
+            ('0028','1052'), # Rescale Intercept
+            ('0028','1053'), # Rescale Slope
+            ('0028','1054'), # Rescale Type
+            ('0018','1250'), # Receive Coil Name
+            ('0018','1310'), # Acquisition Matrix
+            ('0018','1312'), # In-plane Phase Encoding Direction
+            ('0018','0050'), # Slice Thickness
+            ('0018','0015'), # Body Part Examined
+        ]
+        ogse_template_path = 'data/drm_converter/mode/slice1.dcm'
+        try:
+            ogse_ds = pydicom.dcmread(ogse_template_path, stop_before_pixels=True)
+            for group, elem in ogse_fields:
+                tag = pydicom.tag.Tag(int(group,16), int(elem,16))
+                if tag in ogse_ds:
+                    new_ds[tag] = ogse_ds[tag]
+        except Exception as e:
+            import logging
+            logging.warning(f"OGSE模板字段继承失败: {e}")
         
         # 创建file_meta信息
         file_meta = pydicom.FileMetaDataset()
-        file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.4"  # CT Image Storage
+        file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.4"  # MR Image Storage
         file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
         file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
         file_meta.ImplementationVersionName = "PYDICOM " + pydicom.__version__
@@ -263,47 +302,29 @@ class DRMConverter:
             self.logger.info(f"DRM数据范围: {data_min:.6f} 到 {data_max:.6f}")
             
             if data_max > data_min:
-                # 简化处理：将0-10范围的数据缩放到0-4095范围（12位），保持两位小数精度
-                # 这样可以确保DICOM查看器正确显示
-                scale_factor = 100.0  # 保留两位小数 
-                scaled_data = (drm_data_slice * scale_factor).astype(np.uint16)
-                
-                # 限制最大值防止溢出
+                # 直接缩放到0-4095范围（12位），不做小数精度保留
+                scale_factor = 2047.0 if data_max == 0 else 4095.0 / (data_max - data_min)
+                scaled_data = ((drm_data_slice - data_min) * scale_factor).astype(np.uint16)
                 scaled_data = np.clip(scaled_data, 0, 4095)
-                
-                # 设置简单的rescale参数
-                slope = 1.0 / scale_factor  # 0.01
-                intercept = 0.0
-                
-                self.logger.info(f"缩放后范围: {np.min(scaled_data)} 到 {np.max(scaled_data)}")
-                self.logger.info(f"Rescale Slope: {slope:.4f}, Intercept: {intercept:.4f}")
             else:
-                # 如果所有值相同
                 scaled_data = np.zeros_like(drm_data_slice, dtype=np.uint16)
-                slope = 0.01
-                intercept = data_min
-            
             new_ds.BitsAllocated = 16
             new_ds.BitsStored = 12  # 使用12位存储
             new_ds.HighBit = 11
             new_ds.PixelRepresentation = 0  # 无符号
             new_ds.SamplesPerPixel = 1
             new_ds.PhotometricInterpretation = "MONOCHROME2"
-            
-            # 设置简化的缩放参数
-            new_ds.RescaleSlope = f"{slope:.4f}"
-            new_ds.RescaleIntercept = f"{intercept:.4f}"
-            new_ds.RescaleType = "US"  # 指定rescale类型
-            
+            # 固定RescaleSlope为1.0，RescaleIntercept为0.0
+            new_ds.RescaleSlope = "1.0"
+            new_ds.RescaleIntercept = "0.0"
+            new_ds.RescaleType = "US"
             # 设置合适的窗宽窗位，帮助DICOM查看器正确显示
             window_center = (np.max(scaled_data) + np.min(scaled_data)) / 2
             window_width = np.max(scaled_data) - np.min(scaled_data)
             if window_width == 0:
                 window_width = 1000
-            
             new_ds.WindowCenter = str(int(window_center))
             new_ds.WindowWidth = str(int(window_width))
-            
         else:
             # 如果数据已经是整数类型
             scaled_data = drm_data_slice.astype(np.uint16)
@@ -321,7 +342,7 @@ class DRMConverter:
         
         # 更新其他必要字段
         new_ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
-        new_ds.SOPClassUID = "1.2.840.10008.5.1.4.1.1.128"
+        new_ds.SOPClassUID = "1.2.840.10008.5.1.4.1.1.4"  # MR Image Storage
         
         # 更新时间戳
         now = datetime.now()
@@ -440,6 +461,24 @@ class DRMConverter:
             # self.logger.info(f"转换完成！成功: {success_count}, 失败: {failed_count}")
             self.logger.info(f"输出目录: {output_folder}")
             self.logger.info(f"Series UID: {series_uids['series_instance_uid']}")
+            
+            # === [RIPER-5] 自动生成RT Structure Set (RTSS) ===
+            try:
+                # 检查是否有DICOM序列文件
+                if not glob.glob(os.path.join(output_folder, '*.dcm')):
+                    raise RuntimeError("未找到DICOM序列文件，无法生成RTSS")
+                # 2. 生成二值mask（非零为1）
+                mask = (drm_data != 0)
+                # 3. 用rtutils生成RTSS
+                rtstruct = RTStructBuilder.create_new(dicom_series_path=output_folder)
+                rtstruct.add_roi(mask=mask, name="mask")
+                # 4. 保存RTSS文件
+                rtss_path = os.path.join(output_folder, "RTSTRUCT.dcm")
+                rtstruct.save(rtss_path)
+                self.logger.info(f"RT Structure Set (RTSS) 已生成: {rtss_path}")
+            except Exception as e:
+                self.logger.error(f"自动生成RTSS失败: {e}")
+            # === [RIPER-5] END ===
             
             # return success_count > 0 and failed_count == 0
             return True
