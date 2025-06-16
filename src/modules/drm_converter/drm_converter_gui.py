@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from PyQt5.QtGui import QFont
 
-from .drm_converter_main import DRMConverter
+from .drm_converter_main import DRMConverter, save_binary_mask_nii
 
 
 class DRMConverterWorker(QThread):
@@ -223,6 +223,13 @@ class DRMConverterGUI(QWidget):
         help_label.setWordWrap(True)
         main_layout.addWidget(help_label)
         
+        # === 新增：生成二值mask NII按钮 ===
+        mask_btn_layout = QHBoxLayout()
+        self.generate_mask_btn = QPushButton("生成二值mask NII")
+        self.generate_mask_btn.clicked.connect(self.generate_mask_nii)
+        mask_btn_layout.addWidget(self.generate_mask_btn)
+        main_layout.addLayout(mask_btn_layout)
+        
     def setup_logging(self):
         """设置日志"""
         # 简化日志处理，避免冲突
@@ -362,3 +369,25 @@ class DRMConverterGUI(QWidget):
         cursor = self.log_text.textCursor()
         cursor.movePosition(cursor.End)
         self.log_text.setTextCursor(cursor) 
+        
+    def generate_mask_nii(self):
+        """选择NII文件并生成二值mask NII"""
+        from PyQt5.QtWidgets import QFileDialog
+        from .drm_converter_main import save_binary_mask_nii
+        nii_path, _ = QFileDialog.getOpenFileName(self, "选择NII文件", "", "NIfTI文件 (*.nii *.nii.gz)")
+        if not nii_path:
+            return
+        try:
+            self.log_text.append(f"[mask] 处理: {nii_path}")
+            save_binary_mask_nii(nii_path)
+            if nii_path.endswith('.nii.gz'):
+                out_path = nii_path.replace('.nii.gz', '_mask.nii.gz')
+            else:
+                out_path = nii_path.replace('.nii', '_mask.nii')
+            self.log_text.append(f"[mask] 二值mask已保存: {out_path}")
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.information(self, "成功", f"二值mask已保存: {out_path}")
+        except Exception as e:
+            self.log_text.append(f"[mask] 生成失败: {e}")
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "错误", f"生成二值mask失败: {e}") 

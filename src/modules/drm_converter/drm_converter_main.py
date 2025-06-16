@@ -9,6 +9,10 @@ import SimpleITK as sitk
 from datetime import datetime
 import glob
 from rt_utils import RTStructBuilder
+import itertools
+from scipy.ndimage import binary_fill_holes, binary_dilation
+import shutil, tempfile
+from src.modules.drm_converter.rtss_highdicom_util import generate_rtss_with_highdicom
 
 
 class DRMConverter:
@@ -191,7 +195,7 @@ class DRMConverter:
             drm_data_slice: DRM数据切片
             z_position: Z轴位置
             series_uids: series相关的UID字典
-        
+            
         Returns:
             pydicom.Dataset: 新的DICOM数据集
         """
@@ -464,23 +468,68 @@ class DRMConverter:
             
             # === [RIPER-5] 自动生成RT Structure Set (RTSS) ===
             try:
-                # 检查是否有DICOM序列文件
+                import glob
                 if not glob.glob(os.path.join(output_folder, '*.dcm')):
                     raise RuntimeError("未找到DICOM序列文件，无法生成RTSS")
-                # 2. 生成二值mask（非零为1）
-                mask = (drm_data != 0)
-                # 3. 用rtutils生成RTSS
-                rtstruct = RTStructBuilder.create_new(dicom_series_path=output_folder)
-                rtstruct.add_roi(mask=mask, name="mask")
-                # 4. 保存RTSS文件
-                rtss_path = os.path.join(output_folder, "RTSTRUCT.dcm")
-                rtstruct.save(rtss_path)
-                self.logger.info(f"RT Structure Set (RTSS) 已生成: {rtss_path}")
+                base_mask = (drm_data != 0)
+                self.logger.info(f"[RTSS调试] mask非零体素数: {np.sum(base_mask)} / {base_mask.size}")
+                self.logger.info(f"[RTSS调试] mask最大值: {base_mask.max()}，最小值: {base_mask.min()}")
+                # 保存base_mask为NIfTI文件，便于调试
+                try:
+                    mask_img = nib.Nifti1Image(base_mask.astype(np.uint8), affine, nii_header)
+                    mask_save_path = os.path.join(output_folder, "base_mask_debug.nii.gz")
+                    nib.save(mask_img, mask_save_path)
+                    self.logger.info(f"[RTSS调试] base_mask已保存: {mask_save_path}")
+                except Exception as e:
+                    self.logger.error(f"[RTSS调试] base_mask保存NII失败: {e}")
+                sz = np.array(base_mask.shape)
+                c0, c1, c2 = sz // 2
+                w = [max(2, s//4) for s in sz]
+                # cube
+                cube = np.zeros_like(base_mask, dtype=bool)
+                cube[c0-w[0]//2:c0+w[0]//2, c1-w[1]//2:c1+w[1]//2, c2-w[2]//2:c2+w[2]//2] = True
+                # sphere
+                sphere = np.zeros_like(base_mask, dtype=bool)
+                X, Y, Z = np.ogrid[:sz[0], :sz[1], :sz[2]]
+                r = min(sz)//4
+                sphere_center = (c0, c1, c2)
+                dist = (X-sphere_center[0])**2 + (Y-sphere_center[1])**2 + (Z-sphere_center[2])**2
+                sphere[dist < r**2] = True
+                # box
+                box = np.zeros_like(base_mask, dtype=bool)
+                box[[0, -1], :, :] = True
+                box[:, [0, -1], :] = True
+                box[:, :, [0, -1]] = True
+                # random
+                np.random.seed(42)
+                rand_mask = (np.random.rand(*base_mask.shape) > 0.995)
+                # full_left_half：只填充左半边
+                full_left_half = np.zeros_like(base_mask, dtype=bool)
+                full_left_half[:sz[0]//2, :, :] = True
+                mask_variants = [
+                    ("cube_xyz", cube),
+                    ("sphere_xyz", sphere),
+                    ("box_xyz", box),
+                    ("random_xyz", rand_mask),
+                    ("full_left_half_xyz", full_left_half)
+                ]
+                # 只生成一个RTSS，包含所有ROI
+                rtss_output_path = os.path.join(output_folder, "RTSTRUCT_highdicom.dcm")
+                # 取DICOM序列目录
+                dicom_series_dir = output_folder
+                # 生成RTSS
+                for name, mask in mask_variants:
+                    try:
+                        self.logger.info(f"[highdicom] 添加ROI: {name}, shape={mask.shape}, sum={mask.sum()}")
+                        generate_rtss_with_highdicom(dicom_series_dir, mask, f"mask_{name}", rtss_output_path)
+                        self.logger.info(f"[highdicom] RTSS ROI已添加: mask_{name}")
+                    except Exception as e:
+                        self.logger.error(f"[highdicom] 自动生成RTSS ROI失败: {name}: {e}")
+                self.logger.info(f"[highdicom] RT Structure Set (RTSS) 已生成: {rtss_output_path}")
             except Exception as e:
                 self.logger.error(f"自动生成RTSS失败: {e}")
             # === [RIPER-5] END ===
             
-            # return success_count > 0 and failed_count == 0
             return True
             
         except Exception as e:
@@ -546,3 +595,24 @@ class DRMConverter:
         except Exception as e:
             self.logger.error(f"处理DRM文件夹失败: {e}")
             return False 
+
+def save_binary_mask_nii(nii_path: str, out_path: str = None):
+    """
+    将nii文件所有非零体素置为1，保存为新nii文件。
+    Args:
+        nii_path: 输入nii文件路径
+        out_path: 输出nii文件路径（默认在原名加_mask后缀）
+    """
+    import nibabel as nib
+    import numpy as np
+    img = nib.load(nii_path)
+    data = img.get_fdata()
+    mask = (data != 0).astype(np.uint8)
+    mask_img = nib.Nifti1Image(mask, img.affine, img.header)
+    if out_path is None:
+        if nii_path.endswith('.nii.gz'):
+            out_path = nii_path.replace('.nii.gz', '_mask.nii.gz')
+        else:
+            out_path = nii_path.replace('.nii', '_mask.nii')
+    nib.save(mask_img, out_path)
+    print(f"二值mask已保存: {out_path}") 
