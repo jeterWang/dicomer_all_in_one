@@ -18,6 +18,7 @@ class DrmComparator:
         self.rigid_transformed_image: Optional[sitk.Image] = None
         self.final_transformed_image: Optional[sitk.Image] = None
         self.reference_image_for_dvf: Optional[sitk.Image] = None
+        self.target_space_image: Optional[sitk.Image] = None
 
     def load_nifti(self, file_path: str) -> bool:
         """Loads a NIfTI file, preserving its original data type."""
@@ -353,3 +354,83 @@ class DrmComparator:
             )
         except Exception as e:
             return False, f"An error occurred during rigid transformation: {e}"
+
+    def resample_to_target_space(self, target_image_path: str) -> Tuple[bool, str]:
+        """
+        Resamples the final transformed image to the target space defined by the target image.
+        This is the third step in the three-step registration pipeline:
+        1. Original -> Rigid transform -> Intermediate space
+        2. Intermediate -> DVF transform -> DVF space
+        3. DVF space -> Resample -> Target space
+        """
+        if self.final_transformed_image is None:
+            return (
+                False,
+                "Final transformed image not available. Please run apply_transformations() first.",
+            )
+
+        try:
+            # Load target image to get target space information
+            target_img = sitk.ReadImage(target_image_path)
+            print(f"Loaded target space image from: {target_image_path}")
+
+            print("--- Target Space Information ---")
+            print(f"Target size: {target_img.GetSize()}")
+            print(f"Target spacing: {target_img.GetSpacing()}")
+            print(f"Target origin: {target_img.GetOrigin()}")
+            print("--------------------------------")
+
+            print("--- Current DVF Space Information ---")
+            print(f"DVF size: {self.final_transformed_image.GetSize()}")
+            print(f"DVF spacing: {self.final_transformed_image.GetSpacing()}")
+            print(f"DVF origin: {self.final_transformed_image.GetOrigin()}")
+            print("------------------------------------")
+
+            # Create resampler for target space
+            resampler = sitk.ResampleImageFilter()
+            resampler.SetReferenceImage(
+                target_img
+            )  # Use target image to define output space
+            resampler.SetInterpolator(sitk.sitkLinear)  # Bilinear interpolation
+            resampler.SetTransform(
+                sitk.Transform(3, sitk.sitkIdentity)
+            )  # Identity transform (no additional deformation)
+            resampler.SetOutputPixelType(self.final_transformed_image.GetPixelID())
+            resampler.SetDefaultPixelValue(0.0)
+
+            # Execute resampling
+            self.target_space_image = resampler.Execute(self.final_transformed_image)
+
+            print("--- Final Target Space Result ---")
+            print(f"Final size: {self.target_space_image.GetSize()}")
+            print(f"Final spacing: {self.target_space_image.GetSpacing()}")
+            print(f"Final origin: {self.target_space_image.GetOrigin()}")
+            print("---------------------------------")
+
+            print("Successfully resampled to target space.")
+            return (
+                True,
+                "Successfully resampled final transformed image to target space.",
+            )
+
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            return False, f"An error occurred during target space resampling: {e}"
+
+    def save_target_space_image(self, output_path: str) -> Tuple[bool, str]:
+        """
+        Saves the target space resampled image to a file.
+        """
+        if self.target_space_image is None:
+            return (
+                False,
+                "Target space image not available. Please run resample_to_target_space() first.",
+            )
+
+        try:
+            self.save_image(self.target_space_image, output_path)
+            return True, f"Successfully saved target space image to {output_path}"
+        except Exception as e:
+            return False, f"An error occurred while saving target space image: {e}"
