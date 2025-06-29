@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                            QTabWidget, QMenuBar, QMenu, QAction, QStatusBar,
                            QFileDialog, QPushButton, QLabel, QComboBox, QGridLayout,
                            QProgressBar, QTextEdit, QSplitter, QGroupBox, QFormLayout,
-                           QDoubleSpinBox, QCheckBox)
+                           QDoubleSpinBox, QCheckBox, QLineEdit)
 from PyQt5.QtCore import Qt
 import os
 import logging
@@ -55,6 +55,7 @@ class MainWindow(QMainWindow):
         self.add_dvf_pet_applicator_tab() # 添加DVF应用器标签页
         self.add_image_rigid_mover_tab() # 添加刚体位移标签页
         self.add_correlation_analyzer_tab() # 添加相关性分析标签页
+        self.add_nifti_correlation_tab() # 添加NIfTI相关性分析标签页
         self.add_drm_converter_tab()  # 添加DRM转换器标签页
         # 后续可以添加其他模块
         
@@ -964,17 +965,45 @@ class MainWindow(QMainWindow):
         self.roi_combo.setEnabled(False)  # 初始禁用，直到加载RTSS
         analysis_layout.addRow("选择ROI:", self.roi_combo)
         
+        content_layout.addWidget(analysis_group)
+
+        # 自定义选项区域
+        dicom_custom_group = QGroupBox("步骤3: 自定义选项")
+        dicom_custom_layout = QFormLayout(dicom_custom_group)
+
+        # 图表标题
+        self.correlation_chart_title = QLineEdit()
+        self.correlation_chart_title.setPlaceholderText("例如: PET1 vs PET2 相关性分析")
+        dicom_custom_layout.addRow("图表标题:", self.correlation_chart_title)
+
+        # X轴标签
+        self.correlation_x_label = QLineEdit()
+        self.correlation_x_label.setPlaceholderText("例如: PET1 像素值")
+        dicom_custom_layout.addRow("X轴标签:", self.correlation_x_label)
+
+        # Y轴标签
+        self.correlation_y_label = QLineEdit()
+        self.correlation_y_label.setPlaceholderText("例如: PET2 像素值")
+        dicom_custom_layout.addRow("Y轴标签:", self.correlation_y_label)
+
+        # 输出文件前缀
+        self.correlation_output_prefix = QLineEdit()
+        self.correlation_output_prefix.setPlaceholderText("例如: PET_correlation")
+        dicom_custom_layout.addRow("输出文件前缀:", self.correlation_output_prefix)
+
         # 输出目录选择
         self.correlation_output_dir_label = QLabel("输出目录: [未设置]")
         btn_select_correlation_output = QPushButton("选择输出目录")
         btn_select_correlation_output.clicked.connect(self.select_correlation_output_directory)
-        analysis_layout.addRow(self.correlation_output_dir_label, btn_select_correlation_output)
-        
+        dicom_custom_layout.addRow(self.correlation_output_dir_label, btn_select_correlation_output)
+
+        content_layout.addWidget(dicom_custom_group)
+
         # 分析按钮
         self.btn_analyze_correlation = QPushButton("分析相关性")
         self.btn_analyze_correlation.setEnabled(False)  # 初始禁用
         self.btn_analyze_correlation.clicked.connect(self.perform_correlation_analysis)
-        analysis_layout.addRow("", self.btn_analyze_correlation)
+        content_layout.addWidget(self.btn_analyze_correlation)
         
         # 添加分析组
         content_layout.addWidget(analysis_group)
@@ -1183,23 +1212,48 @@ class MainWindow(QMainWindow):
         """执行相关性分析"""
         if not self.btn_analyze_correlation.isEnabled():
             return
-            
+
         # 获取选中的ROI名称
         roi_name = self.roi_combo.currentText()
         if not roi_name:
             self.correlation_log_message("错误: 未选择ROI")
             return
-            
+
+        # 获取自定义选项
+        custom_options = {
+            'chart_title': self.correlation_chart_title.text().strip(),
+            'x_label': self.correlation_x_label.text().strip(),
+            'y_label': self.correlation_y_label.text().strip(),
+            'output_prefix': self.correlation_output_prefix.text().strip()
+        }
+
+        # 设置默认值
+        if not custom_options['chart_title']:
+            custom_options['chart_title'] = f"ROI '{roi_name}' 相关性分析"
+
+        if not custom_options['x_label']:
+            custom_options['x_label'] = "PET1 像素值"
+
+        if not custom_options['y_label']:
+            custom_options['y_label'] = "PET2 像素值"
+
+        if not custom_options['output_prefix']:
+            custom_options['output_prefix'] = roi_name
+
         # 禁用分析按钮，防止重复点击
         self.btn_analyze_correlation.setEnabled(False)
         self.correlation_status_label.setText(f"状态: 正在分析ROI '{roi_name}'的相关性...")
-        
+        self.correlation_log_message(f"图表标题: {custom_options['chart_title']}")
+
+        # 将自定义选项传递给分析器
+        self.correlation_analyzer.custom_options = custom_options
+
         # 执行相关性分析
         success, message = self.correlation_analyzer.analyze_correlation(roi_name, self.correlation_output_dir)
-        
+
         # 重新启用分析按钮
         self.btn_analyze_correlation.setEnabled(True)
-        
+
         # 更新状态
         if success:
             self.correlation_status_label.setText(f"状态: 分析完成")
@@ -1266,7 +1320,287 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 self.correlation_log_message(f"无法创建默认输出目录: {e}") 
 
+    def add_nifti_correlation_tab(self):
+        """添加NIfTI相关性分析标签页"""
+        self.nifti_correlation_tab = QWidget()
+        layout = QVBoxLayout(self.nifti_correlation_tab)
+        layout.setAlignment(Qt.AlignTop)
+
+        # 创建内容容器
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_widget.setMaximumWidth(800)
+
+        # 文件加载区域
+        file_group = QGroupBox("步骤1: 加载NIfTI文件")
+        file_layout = QGridLayout(file_group)
+
+        # 第一个NIfTI文件
+        btn_load_nifti1 = QPushButton("选择第一个NIfTI文件")
+        btn_load_nifti1.clicked.connect(self.load_nifti1_file)
+        self.nifti1_label = QLabel("第一个文件: 未选择")
+        file_layout.addWidget(btn_load_nifti1, 0, 0)
+        file_layout.addWidget(self.nifti1_label, 0, 1)
+
+        # 第二个NIfTI文件
+        btn_load_nifti2 = QPushButton("选择第二个NIfTI文件")
+        btn_load_nifti2.clicked.connect(self.load_nifti2_file)
+        self.nifti2_label = QLabel("第二个文件: 未选择")
+        file_layout.addWidget(btn_load_nifti2, 1, 0)
+        file_layout.addWidget(self.nifti2_label, 1, 1)
+
+        content_layout.addWidget(file_group)
+
+        # 分析选项区域
+        options_group = QGroupBox("步骤2: 选择分析选项")
+        options_layout = QFormLayout(options_group)
+
+        # 掩码选项
+        self.nifti_mask_combo = QComboBox()
+        self.nifti_mask_combo.addItems([
+            "两个图像都非零的像素",
+            "第一个图像的所有非零像素",
+            "第一个图像的所有正值像素",
+            "第一个图像超过阈值的像素(>0.1)"
+        ])
+        self.nifti_mask_combo.setCurrentIndex(0)  # 默认选择最佳选项
+        options_layout.addRow("掩码选项:", self.nifti_mask_combo)
+
+        # 阈值设置
+        self.nifti_threshold_spin = QDoubleSpinBox()
+        self.nifti_threshold_spin.setRange(0.0, 10.0)
+        self.nifti_threshold_spin.setValue(0.1)
+        self.nifti_threshold_spin.setSingleStep(0.1)
+        self.nifti_threshold_spin.setDecimals(2)
+        options_layout.addRow("阈值:", self.nifti_threshold_spin)
+
+        content_layout.addWidget(options_group)
+
+        # 自定义选项区域
+        custom_group = QGroupBox("步骤3: 自定义选项")
+        custom_layout = QFormLayout(custom_group)
+
+        # 图表标题
+        self.nifti_chart_title = QLineEdit()
+        self.nifti_chart_title.setPlaceholderText("例如: DRM vs Target DRM 相关性分析")
+        custom_layout.addRow("图表标题:", self.nifti_chart_title)
+
+        # X轴标签
+        self.nifti_x_label = QLineEdit()
+        self.nifti_x_label.setPlaceholderText("例如: DRM 像素值")
+        custom_layout.addRow("X轴标签:", self.nifti_x_label)
+
+        # Y轴标签
+        self.nifti_y_label = QLineEdit()
+        self.nifti_y_label.setPlaceholderText("例如: Target DRM 像素值")
+        custom_layout.addRow("Y轴标签:", self.nifti_y_label)
+
+        # 输出文件前缀
+        self.nifti_output_prefix = QLineEdit()
+        self.nifti_output_prefix.setPlaceholderText("例如: DRM_analysis")
+        custom_layout.addRow("输出文件前缀:", self.nifti_output_prefix)
+
+        # 输出目录
+        self.nifti_output_label = QLabel("输出目录: [未设置]")
+        btn_select_nifti_output = QPushButton("选择输出目录")
+        btn_select_nifti_output.clicked.connect(self.select_nifti_output_directory)
+        custom_layout.addRow(self.nifti_output_label, btn_select_nifti_output)
+
+        content_layout.addWidget(custom_group)
+
+        # 分析按钮
+        self.btn_analyze_nifti = QPushButton("分析NIfTI相关性")
+        self.btn_analyze_nifti.setEnabled(False)
+        self.btn_analyze_nifti.clicked.connect(self.perform_nifti_correlation_analysis)
+        content_layout.addWidget(self.btn_analyze_nifti)
+
+        # 进度条
+        self.nifti_progress_bar = QProgressBar()
+        self.nifti_progress_bar.setRange(0, 100)
+        self.nifti_progress_bar.setValue(0)
+        content_layout.addWidget(self.nifti_progress_bar)
+
+        # 状态标签
+        self.nifti_status_label = QLabel("状态: 请加载两个NIfTI文件")
+        content_layout.addWidget(self.nifti_status_label)
+
+        # 日志区域
+        self.nifti_log_text = QTextEdit()
+        self.nifti_log_text.setReadOnly(True)
+        self.nifti_log_text.setMinimumHeight(200)
+        content_layout.addWidget(self.nifti_log_text)
+
+        layout.addWidget(content_widget)
+        self.tab_widget.addTab(self.nifti_correlation_tab, "NIfTI相关性分析")
+
+        # 初始化分析器
+        self.nifti_analyzer = CorrelationAnalyzer()
+        self.nifti_analyzer.progress_updated.connect(self.update_nifti_progress)
+        self.nifti_analyzer.process_finished.connect(self.on_nifti_process_finished)
+
+        # 存储路径
+        self.nifti1_path = None
+        self.nifti2_path = None
+        self.nifti_output_dir = None
+
+    def load_nifti1_file(self):
+        """加载第一个NIfTI文件"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择第一个NIfTI文件", "",
+            "NIfTI文件 (*.nii *.nii.gz);;所有文件 (*.*)"
+        )
+
+        if file_path:
+            self.nifti1_path = file_path
+            self.nifti1_label.setText(f"第一个文件: {os.path.basename(file_path)}")
+
+            # 加载文件
+            success, message = self.nifti_analyzer.load_nifti_file(file_path, is_first=True)
+            if success:
+                self.nifti_log_message(f"成功加载第一个文件: {message}")
+                self.nifti_status_label.setText(f"状态: {message}")
+            else:
+                self.nifti_log_message(f"加载第一个文件失败: {message}")
+                self.nifti_status_label.setText(f"状态: 加载失败")
+
+            self.check_enable_nifti_button()
+
+    def load_nifti2_file(self):
+        """加载第二个NIfTI文件"""
+        start_dir = os.path.dirname(self.nifti1_path) if self.nifti1_path else ""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择第二个NIfTI文件", start_dir,
+            "NIfTI文件 (*.nii *.nii.gz);;所有文件 (*.*)"
+        )
+
+        if file_path:
+            self.nifti2_path = file_path
+            self.nifti2_label.setText(f"第二个文件: {os.path.basename(file_path)}")
+
+            # 加载文件
+            success, message = self.nifti_analyzer.load_nifti_file(file_path, is_first=False)
+            if success:
+                self.nifti_log_message(f"成功加载第二个文件: {message}")
+                self.nifti_status_label.setText(f"状态: {message}")
+            else:
+                self.nifti_log_message(f"加载第二个文件失败: {message}")
+                self.nifti_status_label.setText(f"状态: 加载失败")
+
+            self.check_enable_nifti_button()
+
+    def select_nifti_output_directory(self):
+        """选择NIfTI输出目录"""
+        start_dir = os.path.dirname(self.nifti1_path) if self.nifti1_path else os.getcwd()
+        output_dir = QFileDialog.getExistingDirectory(
+            self, "选择输出目录", start_dir, QFileDialog.ShowDirsOnly
+        )
+
+        if output_dir:
+            self.nifti_output_dir = output_dir
+            self.nifti_output_label.setText(f"输出目录: {output_dir}")
+            self.nifti_log_message(f"已设置输出目录: {output_dir}")
+
+    def check_enable_nifti_button(self):
+        """检查是否可以启用NIfTI分析按钮"""
+        can_analyze = (
+            self.nifti_analyzer.nifti1_data["loaded"] and
+            self.nifti_analyzer.nifti2_data["loaded"]
+        )
+        self.btn_analyze_nifti.setEnabled(can_analyze)
+
+        if can_analyze and not self.nifti_output_dir:
+            # 设置默认输出目录
+            default_dir = os.path.join(os.path.dirname(self.nifti1_path), "nifti_correlation_output")
+            try:
+                os.makedirs(default_dir, exist_ok=True)
+                self.nifti_output_dir = default_dir
+                self.nifti_output_label.setText(f"输出目录: {default_dir}")
+                self.nifti_log_message(f"已设置默认输出目录: {default_dir}")
+            except Exception as e:
+                self.nifti_log_message(f"无法创建默认输出目录: {e}")
+
+    def perform_nifti_correlation_analysis(self):
+        """执行NIfTI相关性分析"""
+        if not self.nifti_output_dir:
+            self.select_nifti_output_directory()
+            if not self.nifti_output_dir:
+                return
+
+        # 获取掩码选项
+        mask_text = self.nifti_mask_combo.currentText()
+        mask_option_map = {
+            "两个图像都非零的像素": "non_zero_both",
+            "第一个图像的所有非零像素": "non_zero_first",
+            "第一个图像的所有正值像素": "positive_first",
+            "第一个图像超过阈值的像素(>0.1)": "threshold_first"
+        }
+        mask_option = mask_option_map[mask_text]
+        threshold = self.nifti_threshold_spin.value()
+
+        # 获取自定义选项
+        custom_options = {
+            'chart_title': self.nifti_chart_title.text().strip(),
+            'x_label': self.nifti_x_label.text().strip(),
+            'y_label': self.nifti_y_label.text().strip(),
+            'output_prefix': self.nifti_output_prefix.text().strip()
+        }
+
+        # 设置默认值
+        if not custom_options['chart_title']:
+            file1_name = os.path.basename(self.nifti1_path) if self.nifti1_path else "图像1"
+            file2_name = os.path.basename(self.nifti2_path) if self.nifti2_path else "图像2"
+            custom_options['chart_title'] = f"{file1_name} vs {file2_name} 相关性分析"
+
+        if not custom_options['x_label']:
+            custom_options['x_label'] = os.path.basename(self.nifti1_path) if self.nifti1_path else "图像1像素值"
+
+        if not custom_options['y_label']:
+            custom_options['y_label'] = os.path.basename(self.nifti2_path) if self.nifti2_path else "图像2像素值"
+
+        if not custom_options['output_prefix']:
+            custom_options['output_prefix'] = "nifti_correlation"
+
+        self.nifti_log_message(f"开始分析，掩码选项: {mask_text}")
+        self.nifti_log_message(f"图表标题: {custom_options['chart_title']}")
+        self.btn_analyze_nifti.setEnabled(False)
+
+        # 将自定义选项传递给分析器
+        self.nifti_analyzer.custom_options = custom_options
+
+        # 执行分析
+        success, message = self.nifti_analyzer.analyze_nifti_correlation(
+            mask_option=mask_option,
+            threshold=threshold,
+            output_dir=self.nifti_output_dir
+        )
+
+        if success:
+            self.nifti_log_message(f"分析成功: {message}")
+        else:
+            self.nifti_log_message(f"分析失败: {message}")
+
+        self.btn_analyze_nifti.setEnabled(True)
+
+    def update_nifti_progress(self, value, message):
+        """更新NIfTI进度"""
+        self.nifti_progress_bar.setValue(value)
+        self.nifti_status_label.setText(f"状态: {message}")
+
+    def on_nifti_process_finished(self, success, message):
+        """NIfTI处理完成回调"""
+        if success:
+            self.nifti_log_message(f"✓ 处理完成: {message}")
+        else:
+            self.nifti_log_message(f"✗ 处理失败: {message}")
+        self.nifti_progress_bar.setValue(100 if success else 0)
+
+    def nifti_log_message(self, message):
+        """添加NIfTI日志消息"""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.nifti_log_text.append(f"[{timestamp}] {message}")
+
     def add_drm_converter_tab(self):
         """添加DRM转换器标签页"""
         drm_converter_gui = DRMConverterGUI()
-        self.tab_widget.addTab(drm_converter_gui, "DRM转换器") 
+        self.tab_widget.addTab(drm_converter_gui, "DRM转换器")

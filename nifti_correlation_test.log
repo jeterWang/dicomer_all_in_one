@@ -1,0 +1,38 @@
+2025-06-29 20:40:52,732 - INFO - 成功加载第一个NIfTI图像: data/drm_data/DRM.nii.gz
+2025-06-29 20:40:52,733 - INFO - 图像尺寸: (192, 192, 378), 间距: (3.125, 3.125, 2.680000066757202)
+2025-06-29 20:40:52,859 - INFO - 成功加载第二个NIfTI图像: data/drm_data/targetDRM.nii.gz
+2025-06-29 20:40:52,860 - INFO - 图像尺寸: (192, 192, 386), 间距: (3.125, 3.125, 2.680000066757202)
+2025-06-29 20:40:52,861 - WARNING - 两个图像尺寸不匹配: (192, 192, 378) vs (192, 192, 386)
+2025-06-29 20:40:52,889 - INFO - 已将第二个图像重采样到尺寸: (192, 192, 378)
+2025-06-29 20:40:53,000 - INFO - 图像1数值范围: [0.0, 1.6118985148896308]
+2025-06-29 20:40:53,019 - INFO - 图像2数值范围: [0.0, 1.3459024927937873]
+2025-06-29 20:40:53,040 - INFO - 掩码选项: non_zero_first, 掩码像素数: 486
+2025-06-29 20:40:53,054 - INFO - 掩码包含 486 个像素
+2025-06-29 20:40:53,063 - INFO - Pearson相关系数: r=-0.0107, p=0.8138
+2025-06-29 20:40:53,063 - INFO - Spearman相关系数: r=-0.0950, p=0.0363
+2025-06-29 20:40:53,069 - INFO - 已保存NIfTI相关性数据到CSV: output/nifti_correlation_test\non_zero_first\nifti_correlation_DRM_nii_vs_targetDRM_nii_第一个图像的所有非零像素_20250629_204053.csv
+2025-06-29 20:40:53,407 - INFO - 已保存NIfTI散点图: output/nifti_correlation_test\non_zero_first\nifti_correlation_DRM_nii_vs_targetDRM_nii_第一个图像的所有非零像素_20250629_204053.png
+2025-06-29 20:40:53,516 - INFO - 图像1数值范围: [0.0, 1.6118985148896308]
+2025-06-29 20:40:53,539 - INFO - 图像2数值范围: [0.0, 1.3459024927937873]
+2025-06-29 20:40:53,588 - INFO - 掩码选项: non_zero_both, 掩码像素数: 312
+2025-06-29 20:40:53,603 - INFO - 掩码包含 312 个像素
+2025-06-29 20:40:53,614 - INFO - Pearson相关系数: r=0.6136, p=0.0000
+2025-06-29 20:40:53,615 - INFO - Spearman相关系数: r=0.5889, p=0.0000
+2025-06-29 20:40:53,620 - INFO - 已保存NIfTI相关性数据到CSV: output/nifti_correlation_test\non_zero_both\nifti_correlation_DRM_nii_vs_targetDRM_nii_两个图像都非零的像素_20250629_204053.csv
+2025-06-29 20:40:53,903 - INFO - 已保存NIfTI散点图: output/nifti_correlation_test\non_zero_both\nifti_correlation_DRM_nii_vs_targetDRM_nii_两个图像都非零的像素_20250629_204053.png
+2025-06-29 20:40:54,003 - INFO - 图像1数值范围: [0.0, 1.6118985148896308]
+2025-06-29 20:40:54,023 - INFO - 图像2数值范围: [0.0, 1.3459024927937873]
+2025-06-29 20:40:54,041 - INFO - 掩码选项: positive_first, 掩码像素数: 486
+2025-06-29 20:40:54,057 - INFO - 掩码包含 486 个像素
+2025-06-29 20:40:54,063 - INFO - Pearson相关系数: r=-0.0107, p=0.8138
+2025-06-29 20:40:54,064 - INFO - Spearman相关系数: r=-0.0950, p=0.0363
+2025-06-29 20:40:54,067 - INFO - 已保存NIfTI相关性数据到CSV: output/nifti_correlation_test\positive_first\nifti_correlation_DRM_nii_vs_targetDRM_nii_第一个图像的所有正值像素_20250629_204054.csv
+2025-06-29 20:40:54,335 - INFO - 已保存NIfTI散点图: output/nifti_correlation_test\positive_first\nifti_correlation_DRM_nii_vs_targetDRM_nii_第一个图像的所有正值像素_20250629_204054.png
+2025-06-29 20:40:54,433 - INFO - 图像1数值范围: [0.0, 1.6118985148896308]
+2025-06-29 20:40:54,457 - INFO - 图像2数值范围: [0.0, 1.3459024927937873]
+2025-06-29 20:40:54,475 - INFO - 掩码选项: threshold_first, 掩码像素数: 468
+2025-06-29 20:40:54,490 - INFO - 掩码包含 468 个像素
+2025-06-29 20:40:54,495 - INFO - Pearson相关系数: r=-0.0149, p=0.7481
+2025-06-29 20:40:54,496 - INFO - Spearman相关系数: r=-0.0960, p=0.0379
+2025-06-29 20:40:54,499 - INFO - 已保存NIfTI相关性数据到CSV: output/nifti_correlation_test\threshold_first\nifti_correlation_DRM_nii_vs_targetDRM_nii_第一个图像超过阈值的像素__0_1__20250629_204054.csv
+2025-06-29 20:40:54,740 - INFO - 已保存NIfTI散点图: output/nifti_correlation_test\threshold_first\nifti_correlation_DRM_nii_vs_targetDRM_nii_第一个图像超过阈值的像素__0_1__20250629_204054.png
