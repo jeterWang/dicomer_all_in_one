@@ -16,7 +16,7 @@ class TestDrmComparator(unittest.TestCase):
         """Set up the test environment."""
         self.comparator = DrmComparator()
         self.test_data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'data', 'drm_data'))
-        self.output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'output', 'test_drm_comparator'))
+        self.output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'output', 'test_drm_comparator'))
         
         # Ensure output directory exists
         os.makedirs(self.output_dir, exist_ok=True)
@@ -37,11 +37,10 @@ class TestDrmComparator(unittest.TestCase):
         self.assertIsInstance(self.comparator.rigid_transform, sitk.AffineTransform, "Loaded rigid transform should be an AffineTransform.")
 
         # Test DICOM DVF loading
-        # self.assertTrue(self.comparator.load_dvf(self.dvf_path), "DICOM DVF file should load successfully.")
-        # self.assertIsInstance(self.comparator.dvf_transform, sitk.DisplacementFieldTransform, "Loaded DVF should be a DisplacementFieldTransform.")
-        # self.assertIsInstance(self.comparator.reference_image_for_dvf, sitk.Image, "DVF reference image should be created.")
+        self.assertTrue(self.comparator.load_dvf(self.dvf_path), "DICOM DVF file should load successfully.")
+        self.assertIsInstance(self.comparator.dvf_transform, sitk.DisplacementFieldTransform, "Loaded DVF should be a DisplacementFieldTransform.")
+        self.assertIsInstance(self.comparator.reference_image_for_dvf, sitk.Image, "DVF reference image should be created.")
 
-    @unittest.skip("Skipping full pipeline test until a valid DVF test file is available.")
     def test_02_transformation_pipeline(self):
         """Test the full transformation pipeline from loading to result."""
         # Step 1: Load all necessary files
@@ -73,6 +72,30 @@ class TestDrmComparator(unittest.TestCase):
         self.assertTrue(self.comparator.save_image(self.comparator.rigid_transformed_image, rigid_path))
         self.assertTrue(self.comparator.save_image(self.comparator.final_transformed_image, final_path))
 
+    def test_04_output_file_verification(self):
+        """Verify that the output NIfTI file is created and has correct metadata."""
+        # Step 1: Run the full pipeline to generate the output file
+        self.comparator.load_nifti(self.nifti_path)
+        self.comparator.load_rigid_transform(self.reg_path)
+        self.comparator.load_dvf(self.dvf_path)
+        self.comparator.apply_transformations()
+
+        # Step 2: Define the expected output path and save the final image
+        final_output_path = os.path.join(self.output_dir, "verification_final_output.nii.gz")
+        self.assertTrue(self.comparator.save_image(self.comparator.final_transformed_image, final_output_path))
+
+        # Step 3: Check if the file exists
+        self.assertTrue(os.path.exists(final_output_path), "Final output file should be created.")
+
+        # Step 4: Load the saved file and verify its metadata against the reference grid
+        saved_image = sitk.ReadImage(final_output_path)
+        ref_image = self.comparator.reference_image_for_dvf
+
+        self.assertEqual(saved_image.GetSize(), ref_image.GetSize(), "Saved image size should match DVF grid size.")
+        self.assertTrue(np.allclose(saved_image.GetOrigin(), ref_image.GetOrigin()), "Saved image origin should match DVF grid origin.")
+        self.assertTrue(np.allclose(saved_image.GetSpacing(), ref_image.GetSpacing()), "Saved image spacing should match DVF grid spacing.")
+        self.assertTrue(np.allclose(saved_image.GetDirection(), ref_image.GetDirection()), "Saved image direction should match DVF grid direction.")
+
     def test_03_error_handling(self):
         """Test error handling for incomplete inputs."""
         # Case 1: No files loaded
@@ -87,11 +110,10 @@ class TestDrmComparator(unittest.TestCase):
         self.assertIn("Rigid transform not loaded", message)
 
         # Case 3: NIfTI and REG loaded, but no DVF
-        # This case is currently not testable as the pipeline is disabled.
-        # self.comparator.load_rigid_transform(self.reg_path)
-        # success, message = self.comparator.apply_transformations()
-        # self.assertFalse(success, "Should fail when DVF is not loaded.")
-        # self.assertIn("DVF not loaded", message)
+        self.comparator.load_rigid_transform(self.reg_path)
+        success, message = self.comparator.apply_transformations()
+        self.assertFalse(success, "Should fail when DVF is not loaded.")
+        self.assertIn("DVF not loaded", message)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

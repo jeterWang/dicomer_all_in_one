@@ -12,182 +12,208 @@ from rt_utils import RTStructBuilder
 import itertools
 from scipy.ndimage import binary_fill_holes, binary_dilation
 import shutil, tempfile
-from src.modules.drm_converter.rtss_highdicom_util import generate_rtss_with_highdicom
+from src.modules.drm_converter.rtss_pyradise_util import generate_rtss_with_pyradise
 
 
 class DRMConverter:
     """DRM转换器：将NII.gz文件转换为DICOM series格式"""
-    
+
     def __init__(self):
         self.logger = logging.getLogger(__name__)
-        
+
     def read_nii_file(self, nii_path: str) -> tuple:
         """
         读取NII.gz文件
-        
+
         Args:
             nii_path: NII.gz文件路径
-            
+
         Returns:
             tuple: (image_data, affine_matrix, header)
         """
         try:
             self.logger.info(f"开始读取NII文件: {nii_path}")
             nii_img = nib.load(nii_path)
-            
+
             # 获取基本信息
             self.logger.info(f"NII文件加载成功，准备读取数据...")
             image_data = nii_img.get_fdata()
             affine = nii_img.affine
             header = nii_img.header
-            
+
             self.logger.info(f"成功读取NII文件: {nii_path}")
             self.logger.info(f"图像尺寸: {image_data.shape}")
             self.logger.info(f"数据类型: {image_data.dtype}")
-            self.logger.info(f"数据范围: {image_data.min():.6f} 到 {image_data.max():.6f}")
+            self.logger.info(
+                f"数据范围: {image_data.min():.6f} 到 {image_data.max():.6f}"
+            )
             self.logger.info(f"内存使用: {image_data.nbytes / 1024 / 1024:.2f} MB")
-            
+
             # 检查数据有效性
             if image_data.size == 0:
                 raise ValueError("NII文件包含空数据")
-                
+
             return image_data, affine, header
-            
+
         except Exception as e:
             self.logger.error(f"读取NII文件失败: {e}")
             raise
-    
+
     def read_ct_dicom_template(self, ct_folder_path: str) -> Dict[str, Any]:
         """
         读取CT DICOM文件作为模板，获取头文件信息
-        
+
         Args:
             ct_folder_path: CT DICOM文件夹路径
-            
+
         Returns:
             Dict: DICOM模板信息
         """
         try:
             self.logger.info(f"开始读取CT模板目录: {ct_folder_path}")
-            
+
             if not os.path.exists(ct_folder_path):
                 raise ValueError(f"CT目录不存在: {ct_folder_path}")
-            
+
             # 先获取文件列表
             all_files = os.listdir(ct_folder_path)
-            ct_files = [f for f in all_files if f.endswith('.dcm')]
-            
+            ct_files = [f for f in all_files if f.endswith(".dcm")]
+
             if not ct_files:
                 raise ValueError(f"在{ct_folder_path}中未找到DICOM文件")
-            
+
             self.logger.info(f"找到{len(ct_files)}个DICOM文件")
-            
+
             # 读取第一个DICOM文件作为模板
             template_path = os.path.join(ct_folder_path, ct_files[0])
             self.logger.info(f"读取模板文件: {os.path.basename(template_path)}")
-            
+
             try:
                 template_ds = pydicom.dcmread(template_path)
                 self.logger.info(f"模板文件读取成功")
             except Exception as e:
                 self.logger.error(f"读取模板文件失败: {e}")
                 raise
-            
+
             # 分批读取DICOM文件获取z坐标信息，避免内存问题
             dicom_info = []
             self.logger.info("开始分析DICOM文件的位置信息...")
-            
+
             batch_size = 50  # 每批处理50个文件
             processed_count = 0
-            
+
             for i in range(0, len(ct_files), batch_size):
-                batch_files = ct_files[i:i + batch_size]
-                
+                batch_files = ct_files[i : i + batch_size]
+
                 for j, dcm_file in enumerate(batch_files):
                     try:
                         dcm_path = os.path.join(ct_folder_path, dcm_file)
-                        
+
                         # 只读取必要的标签，节省内存
                         ds = pydicom.dcmread(dcm_path, stop_before_pixels=True)
-                        
-                        if hasattr(ds, 'ImagePositionPatient'):
+
+                        if hasattr(ds, "ImagePositionPatient"):
                             z_pos = float(ds.ImagePositionPatient[2])
-                            dicom_info.append({
-                                'filename': dcm_file,
-                                'z_position': z_pos,
-                                'instance_number': int(ds.InstanceNumber) if hasattr(ds, 'InstanceNumber') else 0
-                            })
-                        
+                            dicom_info.append(
+                                {
+                                    "filename": dcm_file,
+                                    "z_position": z_pos,
+                                    "instance_number": (
+                                        int(ds.InstanceNumber)
+                                        if hasattr(ds, "InstanceNumber")
+                                        else 0
+                                    ),
+                                }
+                            )
+
                         processed_count += 1
-                        
+
                         # 每50个文件报告一次进度
                         if processed_count % 50 == 0:
-                            self.logger.info(f"已处理 {processed_count}/{len(ct_files)} 个DICOM文件")
-                            
+                            self.logger.info(
+                                f"已处理 {processed_count}/{len(ct_files)} 个DICOM文件"
+                            )
+
                     except Exception as e:
                         self.logger.warning(f"跳过无效的DICOM文件 {dcm_file}: {e}")
                         continue
-                
+
                 # 每批处理后清理内存
                 if i > 0:  # 第一批不需要清理
                     import gc
+
                     gc.collect()
-            
+
             if not dicom_info:
                 raise ValueError(f"在{ct_folder_path}中未找到有效的DICOM文件")
-            
+
             # 按z坐标排序
             self.logger.info("排序DICOM切片...")
-            dicom_info.sort(key=lambda x: x['z_position'])
-            
+            dicom_info.sort(key=lambda x: x["z_position"])
+
             self.logger.info(f"成功读取CT模板: {os.path.basename(template_path)}")
             self.logger.info(f"有效DICOM切片数: {len(dicom_info)}")
-            
+
             if dicom_info:
-                z_range = dicom_info[-1]['z_position'] - dicom_info[0]['z_position']
-                self.logger.info(f"Z轴范围: {dicom_info[0]['z_position']:.3f} 到 {dicom_info[-1]['z_position']:.3f} (总计 {z_range:.3f}mm)")
-            
+                z_range = dicom_info[-1]["z_position"] - dicom_info[0]["z_position"]
+                self.logger.info(
+                    f"Z轴范围: {dicom_info[0]['z_position']:.3f} 到 {dicom_info[-1]['z_position']:.3f} (总计 {z_range:.3f}mm)"
+                )
+
             return {
-                'template': template_ds,
-                'dicom_info': dicom_info,
-                'ct_folder_path': ct_folder_path
+                "template": template_ds,
+                "dicom_info": dicom_info,
+                "ct_folder_path": ct_folder_path,
             }
-            
+
         except Exception as e:
             self.logger.error(f"读取CT DICOM模板失败: {e}")
             import traceback
+
             self.logger.error(f"详细错误: {traceback.format_exc()}")
             raise
-    
+
     def create_series_uids(self, template_ds: pydicom.Dataset) -> Dict[str, str]:
         """
         创建新的series相关的UID，确保所有切片属于同一个series
-        
+
         Args:
             template_ds: 模板DICOM数据集
-            
+
         Returns:
             Dict: 包含各种UID的字典
         """
         # 生成新的UID
         new_series_instance_uid = pydicom.uid.generate_uid()
-        new_study_instance_uid = template_ds.StudyInstanceUID if hasattr(template_ds, 'StudyInstanceUID') else pydicom.uid.generate_uid()
-        new_frame_of_reference_uid = template_ds.FrameOfReferenceUID if hasattr(template_ds, 'FrameOfReferenceUID') else pydicom.uid.generate_uid()
-        
+        new_study_instance_uid = (
+            template_ds.StudyInstanceUID
+            if hasattr(template_ds, "StudyInstanceUID")
+            else pydicom.uid.generate_uid()
+        )
+        new_frame_of_reference_uid = (
+            template_ds.FrameOfReferenceUID
+            if hasattr(template_ds, "FrameOfReferenceUID")
+            else pydicom.uid.generate_uid()
+        )
+
         return {
-            'series_instance_uid': new_series_instance_uid,
-            'study_instance_uid': new_study_instance_uid,
-            'frame_of_reference_uid': new_frame_of_reference_uid
+            "series_instance_uid": new_series_instance_uid,
+            "study_instance_uid": new_study_instance_uid,
+            "frame_of_reference_uid": new_frame_of_reference_uid,
         }
-    
-    def create_dicom_header(self, template_ds: pydicom.Dataset, 
-                          slice_index: int, total_slices: int,
-                          drm_data_slice: np.ndarray,
-                          z_position: float,
-                          series_uids: Dict[str, str]) -> pydicom.Dataset:
+
+    def create_dicom_header(
+        self,
+        template_ds: pydicom.Dataset,
+        slice_index: int,
+        total_slices: int,
+        drm_data_slice: np.ndarray,
+        z_position: float,
+        series_uids: Dict[str, str],
+    ) -> pydicom.Dataset:
         """
         基于模板创建新的DICOM头文件
-        
+
         Args:
             template_ds: 模板DICOM数据集
             slice_index: 当前切片索引
@@ -195,7 +221,7 @@ class DRMConverter:
             drm_data_slice: DRM数据切片
             z_position: Z轴位置
             series_uids: series相关的UID字典
-            
+
         Returns:
             pydicom.Dataset: 新的DICOM数据集
         """
@@ -203,23 +229,23 @@ class DRMConverter:
         new_ds = pydicom.Dataset()
         # 复制基本信息（排除像素数据和file_meta相关的元素）
         exclude_tags = [
-            pydicom.tag.Tag('7fe0', '0010'),  # 像素数据
-            pydicom.tag.Tag('0002', '0000'),  # File Meta Information Group Length
-            pydicom.tag.Tag('0002', '0001'),  # File Meta Information Version
-            pydicom.tag.Tag('0002', '0002'),  # Media Storage SOP Class UID
-            pydicom.tag.Tag('0002', '0003'),  # Media Storage SOP Instance UID
-            pydicom.tag.Tag('0002', '0010'),  # Transfer Syntax UID
-            pydicom.tag.Tag('0002', '0012'),  # Implementation Class UID
-            pydicom.tag.Tag('0002', '0013'),  # Implementation Version Name
-            pydicom.tag.Tag('0020', '000e'),  # SeriesInstanceUID
-            pydicom.tag.Tag('0020', '000d'),  # StudyInstanceUID  
-            pydicom.tag.Tag('0020', '0052'),  # FrameOfReferenceUID
-            pydicom.tag.Tag('0020', '0011'),  # SeriesNumber
-            pydicom.tag.Tag('0020', '0013'),  # InstanceNumber
-            pydicom.tag.Tag('0020', '1041'),  # SliceLocation
-            pydicom.tag.Tag('0020', '0032'),  # ImagePositionPatient
-            pydicom.tag.Tag('0008', '0018'),  # SOPInstanceUID
-            pydicom.tag.Tag('0008', '103e'),  # SeriesDescription
+            pydicom.tag.Tag("7fe0", "0010"),  # 像素数据
+            pydicom.tag.Tag("0002", "0000"),  # File Meta Information Group Length
+            pydicom.tag.Tag("0002", "0001"),  # File Meta Information Version
+            pydicom.tag.Tag("0002", "0002"),  # Media Storage SOP Class UID
+            pydicom.tag.Tag("0002", "0003"),  # Media Storage SOP Instance UID
+            pydicom.tag.Tag("0002", "0010"),  # Transfer Syntax UID
+            pydicom.tag.Tag("0002", "0012"),  # Implementation Class UID
+            pydicom.tag.Tag("0002", "0013"),  # Implementation Version Name
+            pydicom.tag.Tag("0020", "000e"),  # SeriesInstanceUID
+            pydicom.tag.Tag("0020", "000d"),  # StudyInstanceUID
+            pydicom.tag.Tag("0020", "0052"),  # FrameOfReferenceUID
+            pydicom.tag.Tag("0020", "0011"),  # SeriesNumber
+            pydicom.tag.Tag("0020", "0013"),  # InstanceNumber
+            pydicom.tag.Tag("0020", "1041"),  # SliceLocation
+            pydicom.tag.Tag("0020", "0032"),  # ImagePositionPatient
+            pydicom.tag.Tag("0008", "0018"),  # SOPInstanceUID
+            pydicom.tag.Tag("0008", "103e"),  # SeriesDescription
         ]
         for element in template_ds:
             if element.tag not in exclude_tags:
@@ -227,88 +253,99 @@ class DRMConverter:
 
         # OGSE白名单字段（仅这些从OGSE模板覆盖）
         ogse_fields = [
-            ('0008','103e'), # Series Description
-            ('0018','1030'), # Protocol Name
-            ('0018','0020'), # Scanning Sequence
-            ('0018','0021'), # Sequence Variant
-            ('0018','0022'), # Scan Options
-            ('0018','0023'), # MR Acquisition Type
-            ('0018','1314'), # Flip Angle
-            ('0018','1316'), # SAR
-            ('0018','1318'), # dB/dt
-            ('0018','0080'), # Repetition Time
-            ('0018','0081'), # Echo Time
-            ('0018','0083'), # Number of Averages
-            ('0018','0087'), # Magnetic Field Strength
-            ('0018','0088'), # Spacing Between Slices
-            ('0018','5100'), # Patient Position
-            ('0028','1050'), # Window Center
-            ('0028','1051'), # Window Width
-            ('0028','1052'), # Rescale Intercept
-            ('0028','1053'), # Rescale Slope
-            ('0028','1054'), # Rescale Type
-            ('0018','1250'), # Receive Coil Name
-            ('0018','1310'), # Acquisition Matrix
-            ('0018','1312'), # In-plane Phase Encoding Direction
-            ('0018','0050'), # Slice Thickness
-            ('0018','0015'), # Body Part Examined
+            ("0008", "103e"),  # Series Description
+            ("0018", "1030"),  # Protocol Name
+            ("0018", "0020"),  # Scanning Sequence
+            ("0018", "0021"),  # Sequence Variant
+            ("0018", "0022"),  # Scan Options
+            ("0018", "0023"),  # MR Acquisition Type
+            ("0018", "1314"),  # Flip Angle
+            ("0018", "1316"),  # SAR
+            ("0018", "1318"),  # dB/dt
+            ("0018", "0080"),  # Repetition Time
+            ("0018", "0081"),  # Echo Time
+            ("0018", "0083"),  # Number of Averages
+            ("0018", "0087"),  # Magnetic Field Strength
+            ("0018", "0088"),  # Spacing Between Slices
+            ("0018", "5100"),  # Patient Position
+            ("0028", "1050"),  # Window Center
+            ("0028", "1051"),  # Window Width
+            ("0028", "1052"),  # Rescale Intercept
+            ("0028", "1053"),  # Rescale Slope
+            ("0028", "1054"),  # Rescale Type
+            ("0018", "1250"),  # Receive Coil Name
+            ("0018", "1310"),  # Acquisition Matrix
+            ("0018", "1312"),  # In-plane Phase Encoding Direction
+            ("0018", "0050"),  # Slice Thickness
+            ("0018", "0015"),  # Body Part Examined
         ]
-        ogse_template_path = 'data/drm_converter/mode/slice1.dcm'
+        ogse_template_path = "data/drm_converter/mode/slice1.dcm"
         try:
             ogse_ds = pydicom.dcmread(ogse_template_path, stop_before_pixels=True)
             for group, elem in ogse_fields:
-                tag = pydicom.tag.Tag(int(group,16), int(elem,16))
+                tag = pydicom.tag.Tag(int(group, 16), int(elem, 16))
                 if tag in ogse_ds:
                     new_ds[tag] = ogse_ds[tag]
         except Exception as e:
             import logging
+
             logging.warning(f"OGSE模板字段继承失败: {e}")
-        
+
         # 创建file_meta信息
         file_meta = pydicom.FileMetaDataset()
-        file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.4"  # MR Image Storage
+        file_meta.MediaStorageSOPClassUID = (
+            "1.2.840.10008.5.1.4.1.1.4"  # MR Image Storage
+        )
         file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
         file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
         file_meta.ImplementationVersionName = "PYDICOM " + pydicom.__version__
         file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian
-        
+
         new_ds.file_meta = file_meta
-        
+
         # 设置关键的series和study信息 - 这是确保文件被识别为一个series的关键
-        new_ds.StudyInstanceUID = series_uids['study_instance_uid']
-        new_ds.SeriesInstanceUID = series_uids['series_instance_uid']
-        new_ds.FrameOfReferenceUID = series_uids['frame_of_reference_uid']
-        
+        new_ds.StudyInstanceUID = series_uids["study_instance_uid"]
+        new_ds.SeriesInstanceUID = series_uids["series_instance_uid"]
+        new_ds.FrameOfReferenceUID = series_uids["frame_of_reference_uid"]
+
         # 更新特定字段
         new_ds.Modality = "MR"
         new_ds.SeriesDescription = "OGSE"
-        new_ds.SeriesNumber = str(int(template_ds.SeriesNumber) + 1000) if hasattr(template_ds, 'SeriesNumber') else "1000"
+        new_ds.SeriesNumber = (
+            str(int(template_ds.SeriesNumber) + 1000)
+            if hasattr(template_ds, "SeriesNumber")
+            else "1000"
+        )
         new_ds.InstanceNumber = str(slice_index + 1)
         new_ds.SliceLocation = f"{z_position:.3f}"
-        
+
         # 更新图像位置 - 确保每个切片有正确的空间位置
-        if hasattr(template_ds, 'ImagePositionPatient'):
+        if hasattr(template_ds, "ImagePositionPatient"):
             new_position = list(template_ds.ImagePositionPatient)
             new_position[2] = z_position  # 更新Z坐标
             new_ds.ImagePositionPatient = [f"{float(x):.3f}" for x in new_position]
-        
+
         # 确保图像方向信息正确
-        if hasattr(template_ds, 'ImageOrientationPatient'):
+        if hasattr(template_ds, "ImageOrientationPatient"):
             new_ds.ImageOrientationPatient = template_ds.ImageOrientationPatient
-        
+
         # 更新像素数据相关信息
         new_ds.Rows, new_ds.Columns = drm_data_slice.shape
-        
+
         # 设置像素数据类型 - 简化精度处理，确保DICOM查看器正确显示
         if drm_data_slice.dtype == np.float32 or drm_data_slice.dtype == np.float64:
             # 获取数据范围
             data_min, data_max = np.min(drm_data_slice), np.max(drm_data_slice)
             self.logger.info(f"DRM数据范围: {data_min:.6f} 到 {data_max:.6f}")
-            
+
             if data_max > data_min:
                 # 直接缩放到0-4095范围（12位），不做小数精度保留
-                scale_factor = 2047.0 if data_max == 0 else 4095.0 / (data_max - data_min)
-                scaled_data = ((drm_data_slice - data_min) * scale_factor).astype(np.uint16)
+                scale_factor = (
+                    2047.0 if data_max == 0 else 4095.0 / (data_max - data_min)
+                )
+                scaled_data = ((drm_data_slice - data_min) * scale_factor).astype(
+                    np.uint16
+                )
                 scaled_data = np.clip(scaled_data, 0, 4095)
             else:
                 scaled_data = np.zeros_like(drm_data_slice, dtype=np.uint16)
@@ -340,98 +377,104 @@ class DRMConverter:
             new_ds.PhotometricInterpretation = "MONOCHROME2"
             new_ds.RescaleSlope = "1.0"
             new_ds.RescaleIntercept = "0.0"
-        
+
         # 设置像素数据
         new_ds.PixelData = scaled_data.tobytes()
-        
+
         # 更新其他必要字段
         new_ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
         new_ds.SOPClassUID = "1.2.840.10008.5.1.4.1.1.4"  # MR Image Storage
-        
+
         # 更新时间戳
         now = datetime.now()
-        new_ds.ContentDate = now.strftime('%Y%m%d')
-        new_ds.ContentTime = now.strftime('%H%M%S.%f')[:-3]
+        new_ds.ContentDate = now.strftime("%Y%m%d")
+        new_ds.ContentTime = now.strftime("%H%M%S.%f")[:-3]
         new_ds.InstanceCreationDate = new_ds.ContentDate
         new_ds.InstanceCreationTime = new_ds.ContentTime
-        
+
         # 确保像素间距信息正确
-        if hasattr(template_ds, 'PixelSpacing'):
+        if hasattr(template_ds, "PixelSpacing"):
             new_ds.PixelSpacing = template_ds.PixelSpacing
-        
-        if hasattr(template_ds, 'SliceThickness'):
+
+        if hasattr(template_ds, "SliceThickness"):
             new_ds.SliceThickness = template_ds.SliceThickness
-        
+
         return new_ds
-    
-    def convert_nii_to_dicom_series(self, nii_path: str, ct_folder_path: str, 
-                                  output_folder: str) -> bool:
+
+    def convert_nii_to_dicom_series(
+        self, nii_path: str, ct_folder_path: str, output_folder: str
+    ) -> bool:
         """
         将NII.gz文件转换为DICOM series
-        
+
         Args:
             nii_path: NII.gz文件路径
             ct_folder_path: CT DICOM文件夹路径（用作模板）
             output_folder: 输出文件夹路径
-            
+
         Returns:
             bool: 转换是否成功
         """
         drm_data = None
         ct_template_info = None
-        
+
         try:
             self.logger.info("开始DRM到DICOM转换...")
-            
+
             # 1. 读取NII文件
             self.logger.info("步骤 1/7: 读取NII文件...")
             drm_data, affine, nii_header = self.read_nii_file(nii_path)
-            
+
             # 添加内存清理
             import gc
+
             gc.collect()
-            
+
             # 2. 读取CT模板
             self.logger.info("步骤 2/7: 读取CT模板...")
             ct_template_info = self.read_ct_dicom_template(ct_folder_path)
-            template_ds = ct_template_info['template']
-            dicom_info = ct_template_info['dicom_info']
-            
+            template_ds = ct_template_info["template"]
+            dicom_info = ct_template_info["dicom_info"]
+
             # 再次清理内存
             gc.collect()
-            
+
             # 3. 创建series相关的UID
             self.logger.info("步骤 3/7: 创建DICOM标识符...")
             series_uids = self.create_series_uids(template_ds)
             self.logger.info(f"新的Series UID: {series_uids['series_instance_uid']}")
-            
+
             # 4. 创建输出目录
             self.logger.info("步骤 4/7: 创建输出目录...")
             Path(output_folder).mkdir(parents=True, exist_ok=True)
-            
+
             # 5. 获取DRM数据的切片数
             self.logger.info("步骤 5/7: 分析数据维度...")
             if len(drm_data.shape) == 3:
                 num_slices = drm_data.shape[2]  # 假设z轴是第三个维度
             else:
                 raise ValueError(f"DRM数据维度不正确: {drm_data.shape}")
-            
+
             self.logger.info(f"DRM数据切片数: {num_slices}")
             self.logger.info(f"CT模板切片数: {len(dicom_info)}")
-            
+
             # 6. 计算空间信息 - 仅用NIfTI的affine矩阵，采用yx排列+180度旋转
-            self.logger.info("步骤 6/7: 计算空间坐标（仅用NIfTI affine，yx排列+180度旋转）...")
+            self.logger.info(
+                "步骤 6/7: 计算空间坐标（仅用NIfTI affine，yx排列+180度旋转）..."
+            )
             affine_used = affine.copy()
             affine_used[:, [0, 1]] = affine_used[:, [1, 0]]
             pixel_spacing = [
                 float(np.linalg.norm(affine_used[0:3, 0])),
-                float(np.linalg.norm(affine_used[0:3, 1]))
+                float(np.linalg.norm(affine_used[0:3, 1])),
             ]
             slice_thickness = float(np.linalg.norm(affine_used[0:3, 2]))
-            orientation = np.concatenate([
-                affine_used[0:3, 0] / pixel_spacing[0],
-                affine_used[0:3, 1] / pixel_spacing[1]
-            ])
+            orientation = np.concatenate(
+                [
+                    affine_used[0:3, 0] / pixel_spacing[0],
+                    affine_used[0:3, 1] / pixel_spacing[1],
+                ]
+            )
             self.logger.info(f"像素间距: {pixel_spacing}")
             self.logger.info(f"切片厚度: {slice_thickness}")
             self.logger.info(f"图像方向: {orientation}")
@@ -439,7 +482,9 @@ class DRMConverter:
             for k in range(num_slices):
                 pos = affine_used @ np.array([0, 0, k, 1])
                 image_positions.append(pos[:3])
-            self.logger.info(f"Z轴范围: {min(image_positions, key=lambda x: x[2])[2]:.3f} 到 {max(image_positions, key=lambda x: x[2])[2]:.3f}")
+            self.logger.info(
+                f"Z轴范围: {min(image_positions, key=lambda x: x[2])[2]:.3f} 到 {max(image_positions, key=lambda x: x[2])[2]:.3f}"
+            )
             # 7. 转换每个切片
             self.logger.info("开始转换切片...")
             Path(output_folder).mkdir(parents=True, exist_ok=True)
@@ -449,7 +494,12 @@ class DRMConverter:
                     drm_slice = np.rot90(drm_slice, 2)  # 180度旋转
                     image_position = image_positions[i]
                     dicom_ds = self.create_dicom_header(
-                        template_ds, i, num_slices, drm_slice, image_position[2], series_uids
+                        template_ds,
+                        i,
+                        num_slices,
+                        drm_slice,
+                        image_position[2],
+                        series_uids,
                     )
                     dicom_ds.PixelSpacing = [f"{x:.6f}" for x in pixel_spacing]
                     dicom_ds.SliceThickness = f"{slice_thickness:.6f}"
@@ -461,39 +511,56 @@ class DRMConverter:
                 except Exception as e:
                     self.logger.error(f"转换第{i+1}个切片失败: {e}")
                     continue
-            
+
             # self.logger.info(f"转换完成！成功: {success_count}, 失败: {failed_count}")
             self.logger.info(f"输出目录: {output_folder}")
             self.logger.info(f"Series UID: {series_uids['series_instance_uid']}")
-            
+
             # === [RIPER-5] 自动生成RT Structure Set (RTSS) ===
             try:
                 import glob
-                if not glob.glob(os.path.join(output_folder, '*.dcm')):
+
+                if not glob.glob(os.path.join(output_folder, "*.dcm")):
                     raise RuntimeError("未找到DICOM序列文件，无法生成RTSS")
-                base_mask = (drm_data != 0)
-                self.logger.info(f"[RTSS调试] mask非零体素数: {np.sum(base_mask)} / {base_mask.size}")
-                self.logger.info(f"[RTSS调试] mask最大值: {base_mask.max()}，最小值: {base_mask.min()}")
+                base_mask = drm_data != 0
+                self.logger.info(
+                    f"[RTSS调试] mask非零体素数: {np.sum(base_mask)} / {base_mask.size}"
+                )
+                self.logger.info(
+                    f"[RTSS调试] mask最大值: {base_mask.max()}，最小值: {base_mask.min()}"
+                )
                 # 保存base_mask为NIfTI文件，便于调试
                 try:
-                    mask_img = nib.Nifti1Image(base_mask.astype(np.uint8), affine, nii_header)
-                    mask_save_path = os.path.join(output_folder, "base_mask_debug.nii.gz")
+                    mask_img = nib.Nifti1Image(
+                        base_mask.astype(np.uint8), affine, nii_header
+                    )
+                    mask_save_path = os.path.join(
+                        output_folder, "base_mask_debug.nii.gz"
+                    )
                     nib.save(mask_img, mask_save_path)
                     self.logger.info(f"[RTSS调试] base_mask已保存: {mask_save_path}")
                 except Exception as e:
                     self.logger.error(f"[RTSS调试] base_mask保存NII失败: {e}")
                 sz = np.array(base_mask.shape)
                 c0, c1, c2 = sz // 2
-                w = [max(2, s//4) for s in sz]
+                w = [max(2, s // 4) for s in sz]
                 # cube
                 cube = np.zeros_like(base_mask, dtype=bool)
-                cube[c0-w[0]//2:c0+w[0]//2, c1-w[1]//2:c1+w[1]//2, c2-w[2]//2:c2+w[2]//2] = True
+                cube[
+                    c0 - w[0] // 2 : c0 + w[0] // 2,
+                    c1 - w[1] // 2 : c1 + w[1] // 2,
+                    c2 - w[2] // 2 : c2 + w[2] // 2,
+                ] = True
                 # sphere
                 sphere = np.zeros_like(base_mask, dtype=bool)
-                X, Y, Z = np.ogrid[:sz[0], :sz[1], :sz[2]]
-                r = min(sz)//4
+                X, Y, Z = np.ogrid[: sz[0], : sz[1], : sz[2]]
+                r = min(sz) // 4
                 sphere_center = (c0, c1, c2)
-                dist = (X-sphere_center[0])**2 + (Y-sphere_center[1])**2 + (Z-sphere_center[2])**2
+                dist = (
+                    (X - sphere_center[0]) ** 2
+                    + (Y - sphere_center[1]) ** 2
+                    + (Z - sphere_center[2]) ** 2
+                )
                 sphere[dist < r**2] = True
                 # box
                 box = np.zeros_like(base_mask, dtype=bool)
@@ -502,99 +569,103 @@ class DRMConverter:
                 box[:, :, [0, -1]] = True
                 # random
                 np.random.seed(42)
-                rand_mask = (np.random.rand(*base_mask.shape) > 0.995)
+                rand_mask = np.random.rand(*base_mask.shape) > 0.995
                 # full_left_half：只填充左半边
                 full_left_half = np.zeros_like(base_mask, dtype=bool)
-                full_left_half[:sz[0]//2, :, :] = True
+                full_left_half[: sz[0] // 2, :, :] = True
                 mask_variants = [
                     ("cube_xyz", cube),
                     ("sphere_xyz", sphere),
                     ("box_xyz", box),
                     ("random_xyz", rand_mask),
-                    ("full_left_half_xyz", full_left_half)
+                    ("full_left_half_xyz", full_left_half),
                 ]
                 # 只生成一个RTSS，包含所有ROI
-                rtss_output_path = os.path.join(output_folder, "RTSTRUCT_highdicom.dcm")
-                # 取DICOM序列目录
+                rtss_output_path = os.path.join(output_folder, "RTSTRUCT_pyradise.dcm")
                 dicom_series_dir = output_folder
-                # 生成RTSS
-                for name, mask in mask_variants:
-                    try:
-                        self.logger.info(f"[highdicom] 添加ROI: {name}, shape={mask.shape}, sum={mask.sum()}")
-                        generate_rtss_with_highdicom(dicom_series_dir, mask, f"mask_{name}", rtss_output_path)
-                        self.logger.info(f"[highdicom] RTSS ROI已添加: mask_{name}")
-                    except Exception as e:
-                        self.logger.error(f"[highdicom] 自动生成RTSS ROI失败: {name}: {e}")
-                self.logger.info(f"[highdicom] RT Structure Set (RTSS) 已生成: {rtss_output_path}")
+                # 生成RTSS（只用一个mask，名为mask）
+                try:
+                    self.logger.info(
+                        f"[pyradise] 自动生成RTSS, shape={base_mask.shape}, sum={base_mask.sum()}"
+                    )
+                    generate_rtss_with_pyradise(
+                        dicom_series_dir, base_mask, rtss_output_path, roi_name="mask"
+                    )
+                    self.logger.info(f"[pyradise] RTSS已生成: {rtss_output_path}")
+                except Exception as e:
+                    self.logger.error(f"[pyradise] 自动生成RTSS失败: {e}")
             except Exception as e:
                 self.logger.error(f"自动生成RTSS失败: {e}")
             # === [RIPER-5] END ===
-            
+
             return True
-            
+
         except Exception as e:
             self.logger.error(f"DRM到DICOM转换失败: {e}")
             import traceback
+
             self.logger.error(f"详细错误: {traceback.format_exc()}")
             return False
         finally:
             # 最终清理内存
             try:
-                if 'drm_data' in locals() and drm_data is not None:
+                if "drm_data" in locals() and drm_data is not None:
                     del drm_data
-                if 'ct_template_info' in locals() and ct_template_info is not None:
+                if "ct_template_info" in locals() and ct_template_info is not None:
                     del ct_template_info
                 import gc
+
                 gc.collect()
                 self.logger.info("内存清理完成")
             except:
                 pass
-    
+
     def convert_drm_folder(self, drm_folder_path: str, output_base_folder: str) -> bool:
         """
         转换整个DRM文件夹
-        
+
         Args:
             drm_folder_path: DRM文件夹路径（如FAPI_DRM）
             output_base_folder: 输出基础文件夹路径
-            
+
         Returns:
             bool: 转换是否成功
         """
         try:
             self.logger.info(f"开始处理DRM文件夹: {drm_folder_path}")
-            
+
             # 查找DRM.nii.gz文件
             nii_file = None
             for filename in os.listdir(drm_folder_path):
-                if filename.lower().endswith('.nii.gz') and 'drm' in filename.lower():
+                if filename.lower().endswith(".nii.gz") and "drm" in filename.lower():
                     nii_file = os.path.join(drm_folder_path, filename)
                     break
-            
+
             if not nii_file:
                 raise ValueError(f"在{drm_folder_path}中未找到DRM.nii.gz文件")
-            
+
             # 查找CT文件夹
             ct_folder = None
             for item in os.listdir(drm_folder_path):
                 item_path = os.path.join(drm_folder_path, item)
-                if os.path.isdir(item_path) and 'CT' in item:
+                if os.path.isdir(item_path) and "CT" in item:
                     ct_folder = item_path
                     break
-            
+
             if not ct_folder:
                 raise ValueError(f"在{drm_folder_path}中未找到CT文件夹")
-            
+
             # 创建输出文件夹
             folder_name = os.path.basename(drm_folder_path)
             output_folder = os.path.join(output_base_folder, f"{folder_name}_DRM_DICOM")
-            
+
             # 执行转换
             return self.convert_nii_to_dicom_series(nii_file, ct_folder, output_folder)
-            
+
         except Exception as e:
             self.logger.error(f"处理DRM文件夹失败: {e}")
-            return False 
+            return False
+
 
 def save_binary_mask_nii(nii_path: str, out_path: str = None):
     """
@@ -605,14 +676,15 @@ def save_binary_mask_nii(nii_path: str, out_path: str = None):
     """
     import nibabel as nib
     import numpy as np
+
     img = nib.load(nii_path)
     data = img.get_fdata()
     mask = (data != 0).astype(np.uint8)
     mask_img = nib.Nifti1Image(mask, img.affine, img.header)
     if out_path is None:
-        if nii_path.endswith('.nii.gz'):
-            out_path = nii_path.replace('.nii.gz', '_mask.nii.gz')
+        if nii_path.endswith(".nii.gz"):
+            out_path = nii_path.replace(".nii.gz", "_mask.nii.gz")
         else:
-            out_path = nii_path.replace('.nii', '_mask.nii')
+            out_path = nii_path.replace(".nii", "_mask.nii")
     nib.save(mask_img, out_path)
-    print(f"二值mask已保存: {out_path}") 
+    print(f"二值mask已保存: {out_path}")
