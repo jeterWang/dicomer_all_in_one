@@ -1670,7 +1670,6 @@ class CorrelationAnalyzer(QObject):
             plt.ylabel(y_label)
             plt.title(
                 f"{chart_title}\n"
-                f"掩码: {mask_label}\n"
                 f"Pearson r = {pearson_r_str} (p = {pearson_p_str})\n"
                 f"Spearman r = {spearman_r_str} (p = {spearman_p_str})\n"
                 f"像素数量 = {len(values1)}"

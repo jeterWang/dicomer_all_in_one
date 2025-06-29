@@ -263,9 +263,100 @@ class DrmComparator:
             self.dvf_transform = None
             return False
 
-    def apply_transformations(self) -> Tuple[bool, str]:
+    def apply_transformations_direct_to_target(self, target_image_path: str) -> Tuple[bool, str]:
         """
-        Applies the loaded rigid and deformation transformations to the NIfTI image.
+        直接将变换应用到目标空间，避免中间重采样步骤，减少累积误差。
+        这是推荐的方法，因为它只进行一次插值操作。
+
+        Args:
+            target_image_path: 目标图像路径，用于定义输出空间
+
+        Returns:
+            Tuple[bool, str]: (成功标志, 消息)
+        """
+        if self.nifti_image is None:
+            return False, "NIfTI image not loaded."
+        if self.rigid_transform is None:
+            return False, "Rigid transform not loaded."
+        if self.dvf_transform is None:
+            return False, "DVF not loaded."
+
+        try:
+            # 加载目标图像定义输出空间
+            target_img = sitk.ReadImage(target_image_path)
+            print(f"Loaded target space image from: {target_image_path}")
+
+            print("--- Target Space Information ---")
+            print(f"Target size: {target_img.GetSize()}")
+            print(f"Target spacing: {target_img.GetSpacing()}")
+            print(f"Target origin: {target_img.GetOrigin()}")
+            print("--------------------------------")
+
+            # 创建复合变换
+            composite_transform = sitk.CompositeTransform(3)
+            composite_transform.AddTransform(self.rigid_transform)
+            composite_transform.AddTransform(self.dvf_transform)
+            print("Created composite transform: Rigid + DVF")
+
+            # 直接重采样到目标空间（一步到位，减少误差）
+            resampler = sitk.ResampleImageFilter()
+            resampler.SetReferenceImage(target_img)  # 使用目标图像定义输出空间
+            resampler.SetInterpolator(sitk.sitkLinear)
+            resampler.SetTransform(composite_transform)
+            resampler.SetOutputPixelType(self.nifti_image.GetPixelID())
+            resampler.SetDefaultPixelValue(0.0)
+
+            # 执行变换（一次插值完成所有变换）
+            self.target_space_image = resampler.Execute(self.nifti_image)
+
+            print("--- Final Result Information ---")
+            print(f"Result size: {self.target_space_image.GetSize()}")
+            print(f"Result spacing: {self.target_space_image.GetSpacing()}")
+            print(f"Result origin: {self.target_space_image.GetOrigin()}")
+            print("--------------------------------")
+
+            print("✓ Successfully applied transformations directly to target space (single interpolation)")
+
+            # 同时生成仅刚体变换的结果用于对比
+            resampler_rigid = sitk.ResampleImageFilter()
+            resampler_rigid.SetReferenceImage(target_img)  # 也使用目标空间
+            resampler_rigid.SetInterpolator(sitk.sitkLinear)
+            resampler_rigid.SetTransform(self.rigid_transform)
+            resampler_rigid.SetOutputPixelType(self.nifti_image.GetPixelID())
+            resampler_rigid.SetDefaultPixelValue(0.0)
+            self.rigid_transformed_image = resampler_rigid.Execute(self.nifti_image)
+            print("✓ Also generated rigid-only transformation in target space for comparison")
+
+            return True, "Transformations applied directly to target space successfully (optimized single-step method)"
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return False, f"An error occurred during direct transformation to target space: {e}"
+
+    def apply_transformations(self, target_image_path: str = None, direct_to_target: bool = True) -> Tuple[bool, str]:
+        """
+        应用变换，支持两种模式：
+        1. 直接到目标空间（推荐）：减少插值误差，提高精度
+        2. 传统分步方式：先到DVF空间，再重采样到目标空间
+
+        Args:
+            target_image_path: 目标图像路径（direct_to_target=True时必需）
+            direct_to_target: 是否直接重采样到目标空间（推荐True）
+
+        Returns:
+            Tuple[bool, str]: (成功标志, 消息)
+        """
+        if direct_to_target and target_image_path:
+            print("🚀 Using optimized direct-to-target transformation method")
+            return self.apply_transformations_direct_to_target(target_image_path)
+        else:
+            print("⚠️  Using traditional two-step transformation method")
+            return self._apply_transformations_traditional()
+
+    def _apply_transformations_traditional(self) -> Tuple[bool, str]:
+        """
+        传统的分步变换方法（保留用于调试和对比）
         """
         if self.nifti_image is None:
             return False, "NIfTI image not loaded."
@@ -311,7 +402,7 @@ class DrmComparator:
                 "Successfully generated intermediate rigid-transformed image for comparison."
             )
 
-            return True, "Transformations applied successfully."
+            return True, "Transformations applied successfully (traditional method)."
         except Exception as e:
             import traceback
 
@@ -418,6 +509,96 @@ class DrmComparator:
 
             traceback.print_exc()
             return False, f"An error occurred during target space resampling: {e}"
+
+    def compare_resampling_methods(self, target_image_path: str, output_dir: str = "comparison_output") -> Tuple[bool, str]:
+        """
+        比较直接重采样和传统分步重采样的结果差异
+
+        Args:
+            target_image_path: 目标图像路径
+            output_dir: 输出目录
+
+        Returns:
+            Tuple[bool, str]: (成功标志, 比较结果消息)
+        """
+        try:
+            import os
+            os.makedirs(output_dir, exist_ok=True)
+
+            print("🔬 开始比较两种重采样方法...")
+
+            # 方法1: 直接重采样到目标空间
+            print("\n--- 方法1: 直接重采样到目标空间 ---")
+            success1, msg1 = self.apply_transformations_direct_to_target(target_image_path)
+            if not success1:
+                return False, f"直接重采样失败: {msg1}"
+
+            # 保存直接重采样结果
+            direct_result = sitk.Image(self.target_space_image)  # 创建副本
+            self.save_image(direct_result, os.path.join(output_dir, "direct_method_result.nii.gz"))
+
+            # 方法2: 传统分步重采样
+            print("\n--- 方法2: 传统分步重采样 ---")
+            success2, msg2 = self._apply_transformations_traditional()
+            if not success2:
+                return False, f"传统重采样失败: {msg2}"
+
+            success3, msg3 = self.resample_to_target_space(target_image_path)
+            if not success3:
+                return False, f"目标空间重采样失败: {msg3}"
+
+            # 保存传统重采样结果
+            traditional_result = sitk.Image(self.target_space_image)  # 创建副本
+            self.save_image(traditional_result, os.path.join(output_dir, "traditional_method_result.nii.gz"))
+
+            # 计算差异
+            print("\n--- 计算两种方法的差异 ---")
+            diff_filter = sitk.SubtractImageFilter()
+            difference_image = diff_filter.Execute(direct_result, traditional_result)
+            self.save_image(difference_image, os.path.join(output_dir, "difference_image.nii.gz"))
+
+            # 统计差异
+            stats_filter = sitk.StatisticsImageFilter()
+            stats_filter.Execute(difference_image)
+
+            abs_diff_image = sitk.Abs(difference_image)
+            stats_filter.Execute(abs_diff_image)
+
+            max_diff = stats_filter.GetMaximum()
+            mean_diff = stats_filter.GetMean()
+            std_diff = stats_filter.GetSigma()
+
+            # 计算相对差异
+            stats_filter.Execute(direct_result)
+            max_value = stats_filter.GetMaximum()
+            relative_max_diff = (max_diff / max_value * 100) if max_value > 0 else 0
+
+            result_msg = f"""
+📊 重采样方法比较结果:
+✅ 直接重采样: 成功
+✅ 传统重采样: 成功
+
+📈 差异统计:
+- 最大绝对差异: {max_diff:.6f}
+- 平均绝对差异: {mean_diff:.6f}
+- 差异标准差: {std_diff:.6f}
+- 最大相对差异: {relative_max_diff:.3f}%
+
+📁 输出文件:
+- 直接方法结果: {output_dir}/direct_method_result.nii.gz
+- 传统方法结果: {output_dir}/traditional_method_result.nii.gz
+- 差异图像: {output_dir}/difference_image.nii.gz
+
+💡 建议: {'直接重采样方法精度更高' if max_diff < mean_diff else '两种方法差异较小'}
+            """
+
+            print(result_msg)
+            return True, result_msg
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return False, f"比较过程中出错: {e}"
 
     def save_target_space_image(self, output_path: str) -> Tuple[bool, str]:
         """

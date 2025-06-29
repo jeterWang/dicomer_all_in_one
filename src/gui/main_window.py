@@ -18,6 +18,7 @@ from src.modules.dvf_applier import DVFApplier  # 导入DVF应用器模块
 from src.modules.image_regid_mover import ImageRigidMover  # 导入刚体位移模块
 from src.modules.correlation_analyzer import CorrelationAnalyzer  # 导入相关性分析模块
 from src.modules.drm_converter.drm_converter_gui import DRMConverterGUI  # 导入DRM转换器模块
+from .modules.drm_comparator_gui import DrmComparatorGUI  # 导入DRM比较器模块
 # 后续可以添加其他模块的导入
 
 class MainWindow(QMainWindow):
@@ -56,6 +57,7 @@ class MainWindow(QMainWindow):
         self.add_image_rigid_mover_tab() # 添加刚体位移标签页
         self.add_correlation_analyzer_tab() # 添加相关性分析标签页
         self.add_nifti_correlation_tab() # 添加NIfTI相关性分析标签页
+        self.add_drm_comparator_tab()  # 添加DRM比较器标签页
         self.add_drm_converter_tab()  # 添加DRM转换器标签页
         # 后续可以添加其他模块
         
@@ -1599,6 +1601,11 @@ class MainWindow(QMainWindow):
         from datetime import datetime
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.nifti_log_text.append(f"[{timestamp}] {message}")
+
+    def add_drm_comparator_tab(self):
+        """添加DRM比较器标签页"""
+        drm_comparator_gui = DrmComparatorGUI()
+        self.tab_widget.addTab(drm_comparator_gui, "DRM比较器")
 
     def add_drm_converter_tab(self):
         """添加DRM转换器标签页"""
